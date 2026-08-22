@@ -424,7 +424,7 @@ export function createChannel(partial?: Partial<ChannelState>): ChannelState {
   };
 }
 
-export function startGlide(ch: ChannelState): ChannelState {
+export function startGlide(ch: ChannelState, nowMs: number = performance.now()): ChannelState {
   const g = normalizeGlide(ch.glide, ch.frequency, ch.pan);
   const home = Math.max(20, g.homeHz);
   const dest = Math.max(20, g.destHz);
@@ -444,7 +444,7 @@ export function startGlide(ch: ChannelState): ChannelState {
       durationDownSec: Math.max(0.1, g.durationDownSec),
       panHome: clampPan(g.panHome),
       panDest: clampPan(g.panDest),
-      startedAtMs: performance.now(),
+      startedAtMs: nowMs,
     },
   };
 }
@@ -459,6 +459,19 @@ export function stopGlide(ch: ChannelState): ChannelState {
       startedAtMs: null,
     },
   };
+}
+
+/** Start every channel that has Frequency glide enabled, on the same clock (unison). */
+export function startEnabledGlides(
+  channels: ChannelState[],
+  nowMs: number = performance.now(),
+): ChannelState[] {
+  return channels.map((ch) => (ch.glide?.enabled ? startGlide(ch, nowMs) : ch));
+}
+
+/** Stop every running glide. Channels without a running glide are unchanged. */
+export function stopAllGlides(channels: ChannelState[]): ChannelState[] {
+  return channels.map((ch) => (ch.glide?.running ? stopGlide(ch) : ch));
 }
 
 function applyLegEnd(
@@ -553,17 +566,19 @@ export function defaultChannels(): ChannelState[] {
       id: 3,
       label: 'Ch 3',
       frequency: 300,
-      gain: 0,
-      pan: 0,
-      muted: true,
+      gain: 0.5,
+      pan: -0.35,
+      phaseDeg: 30,
+      muted: false,
     }),
     createChannel({
       id: 4,
       label: 'Ch 4',
       frequency: 400,
-      gain: 0,
-      pan: 0,
-      muted: true,
+      gain: 0.5,
+      pan: 0.35,
+      phaseDeg: 60,
+      muted: false,
     }),
   ];
 }
@@ -650,7 +665,7 @@ export function applyBinauralPair(
         harmonics: [],
       };
     }
-    return { ...ch, muted: true, gain: 0 };
+    return { ...ch, muted: true };
   });
 }
 

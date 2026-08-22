@@ -39,6 +39,44 @@
   color: #9b93b0;
 }
 
+.header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.unison-glide {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  padding-left: 0.65rem;
+  border-left: 1px solid #2a2438;
+}
+
+.unison-glide-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #c4b5fd;
+}
+
+.unison-glide-count {
+  font-size: 0.62rem;
+  color: #7a7390;
+  font-variant-numeric: tabular-nums;
+}
+
+.unison-glide .btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* ——— Split workspace: 70% viz / 30% controls ——— */
 .workspace {
   flex: 1;
@@ -539,6 +577,12 @@
 .field input[type='range'] {
   width: 100%;
   accent-color: #a78bfa;
+}
+
+.field input:disabled,
+.field select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .btn {

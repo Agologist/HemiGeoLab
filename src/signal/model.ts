@@ -384,7 +384,7 @@ export const EXPERIMENT_PRESETS: ExperimentPreset[] = [
 ];
 
 function mute(c: ChannelState): ChannelState {
-  return { ...c, muted: true, gain: 0 };
+  return { ...c, muted: true };
 }
 
 function mapActive(

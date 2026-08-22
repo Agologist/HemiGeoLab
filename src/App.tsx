@@ -17,7 +17,9 @@ import {
   removeChannel,
   removeHarmonic,
   setHarmonicGain,
+  startEnabledGlides,
   startGlide,
+  stopAllGlides,
   stopGlide,
   tickGlides,
   type ChannelState,
@@ -85,6 +87,15 @@ export default function App() {
     return Math.abs(a[0].frequency - a[1].frequency);
   }, [channels]);
 
+  const glideReady = useMemo(
+    () => channels.filter((c) => c.glide?.enabled).length,
+    [channels],
+  );
+  const glideRunning = useMemo(
+    () => channels.filter((c) => c.glide?.running).length,
+    [channels],
+  );
+
   const pushChannels = useCallback((next: ChannelState[]) => {
     setChannels(next);
     setAnalysis(analyzeSignal(next));
@@ -95,15 +106,20 @@ export default function App() {
     setChannels((prev) => {
       const next = prev.map((c) => {
         if (c.id !== id) return c;
-        // Manual f0 or pan edit stops a running glide on that channel
-        if ((patch.frequency != null || patch.pan != null) && c.glide?.running) {
+        const nextPatch: Partial<ChannelState> = { ...patch };
+        // Linked pan is driven by the glide — ignore the mixer pan slider
+        if (nextPatch.pan != null && c.glide?.linkPan) {
+          delete nextPatch.pan;
+        }
+        // Manual f0 edit still stops a running glide; pan does not
+        if (nextPatch.frequency != null && c.glide?.running) {
           return {
             ...c,
-            ...patch,
+            ...nextPatch,
             glide: { ...c.glide, running: false, startedAtMs: null },
           };
         }
-        return { ...c, ...patch };
+        return { ...c, ...nextPatch };
       });
       setAnalysis(analyzeSignal(next));
       if (engine.isPlaying()) engine.updateAll(next);
@@ -155,6 +171,16 @@ export default function App() {
     setPlaying(false);
   };
 
+  const onGoAllGlides = () => {
+    if (glideReady === 0) return;
+    pushChannels(startEnabledGlides(channels));
+  };
+
+  const onStopAllGlides = () => {
+    if (glideRunning === 0) return;
+    pushChannels(stopAllGlides(channels));
+  };
+
   const markFinding = () => {
     const name = window.prompt('Name this finding (optional)', analysis.label);
     if (name === null) return;
@@ -196,6 +222,41 @@ export default function App() {
               Stop
             </button>
           )}
+          <div className="unison-glide">
+            <span className="unison-glide-label">
+              Unison glide <Tip text={TIPS.unisonGlide} />
+            </span>
+            <button
+              type="button"
+              className="btn"
+              disabled={glideReady === 0}
+              title={
+                glideReady === 0
+                  ? 'Enable Frequency glide on at least one channel'
+                  : `Start ${glideReady} enabled channel${glideReady === 1 ? '' : 's'} together`
+              }
+              onClick={onGoAllGlides}
+            >
+              Go all
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={glideRunning === 0}
+              title={
+                glideRunning === 0
+                  ? 'No glide is running'
+                  : `Stop ${glideRunning} running glide${glideRunning === 1 ? '' : 's'}`
+              }
+              onClick={onStopAllGlides}
+            >
+              Stop all
+            </button>
+            <span className="unison-glide-count">
+              {glideReady} ready
+              {glideRunning > 0 ? ` · ${glideRunning} running` : ''}
+            </span>
+          </div>
         </div>
       </header>
 
@@ -436,7 +497,14 @@ function ChannelStrip({
               <input
                 type="checkbox"
                 checked={ch.muted}
-                onChange={(e) => onChange(ch.id, { muted: e.target.checked })}
+                onChange={(e) => {
+                  const muted = e.target.checked;
+                  // Unmute must be audible: some presets used to zero gain on mute
+                  onChange(ch.id, {
+                    muted,
+                    ...(muted || ch.gain >= 0.02 ? {} : { gain: 0.5 }),
+                  });
+                }}
               />
               Mute <Tip text={TIPS.mute} />
             </label>
@@ -498,9 +566,7 @@ function ChannelStrip({
           <label className="field grow pan-field">
             <span className="field-label">
               Pan L ← {panPct}% → R <Tip text={TIPS.pan} />
-              {ch.glide.running && ch.glide.linkPan && (
-                <span className="glide-live">linked</span>
-              )}
+              {ch.glide.linkPan && <span className="glide-live">linked</span>}
             </span>
             <input
               type="range"
@@ -508,7 +574,12 @@ function ChannelStrip({
               max={1}
               step={0.01}
               value={ch.pan}
-              disabled={ch.glide.running && ch.glide.linkPan}
+              disabled={ch.glide.linkPan}
+              title={
+                ch.glide.linkPan
+                  ? 'Pan is locked while Link pan to glide is on — use Pan home / Pan dest'
+                  : undefined
+              }
               onChange={(e) => onChange(ch.id, { pan: Number(e.target.value) })}
             />
           </label>
@@ -910,17 +981,19 @@ const TIPS = {
   channels:
     'Each channel is one voice: fundamental f0, optional harmonics, gain, phase, pan, wave. Together they define both the sound and the vector-scope path.',
   master: 'Overall output volume after all channels are mixed. Lower it if you add many loud channels or harmonics.',
-  mute: 'Silences this channel in audio and removes it from the geometry path until unmuted.',
+  mute: 'Silences this channel in audio and removes it from the geometry path until unmuted. Unmuting restores sound (including a default gain if the fader was at zero).',
   f0: 'Fundamental frequency of this channel (Hz). Harmonics Hn are exactly n × f0.',
   gain: 'H1 / fundamental level (0–100%). Also scales overtones: each Hn slider is relative to this.',
   phase:
     'Starting phase in degrees. Alone it only shifts timing on a line; relative phase between L/R channels (e.g. ~90°) is what opens ellipses/circles.',
-  pan: 'Stereo placement and scope direction: left → horizontal (X), right → vertical (Y), center → diagonal. Audio and plot share this mapping.',
+  pan: 'Stereo placement and scope direction: left → horizontal (X), right → vertical (Y), center → diagonal. Audio and plot share this mapping. You can move pan during a frequency glide unless “Link pan to glide” is on, which locks this slider.',
   wave: 'Oscillator waveform. Sine is purest for clean geometry; triangle/square/saw add their own overtone character in the audio engine.',
   harmonics:
     'Overtones at integer multiples of f0 (H2 = 2×f0, H3 = 3×f0, …). Each shows its Hz and level. They fold the path denser while staying locked to the fundamental.',
   glide:
-    'Optional: ramp f0 from Home to Destination. Off by default. With ping-pong, it loops back using Down time. Harmonics stay n×f0; geometry follows live f0.',
+    'Optional: ramp f0 from Home to Destination. Off by default. With ping-pong, it loops back using Down time. Harmonics stay n×f0; geometry follows live f0. Use Go on a channel, or Unison glide at the top to start every enabled channel together.',
+  unisonGlide:
+    'Starts every channel that has Frequency glide checked, on the same clock — they all jump to Home and ramp together. Each channel keeps its own Home, Dest, times, curve, and pan-link. Per-channel Go still works for one voice. Stop all ends every running glide.',
   glideHome: 'Starting frequency (Hz) when you press Go. f0 jumps here, then ramps toward Destination (up leg).',
   glideDest: 'Far frequency (Hz). One-shot ends here; ping-pong turns around and returns to Home.',
   glideTimeUp: 'Duration of the Home → Destination leg (seconds).',
@@ -931,7 +1004,7 @@ const TIPS = {
   glideCurve:
     'Log (pitch): equal octave steps — usually more natural. Linear (Hz): constant Hz per second. Applied on both legs.',
   glideLinkPan:
-    'When on, pan moves with the same progress fraction as frequency (and reverses on the down leg if ping-pong). Stereo image and scope axes sweep together.',
+    'When on, the mixer pan slider is locked and pan moves with the same progress as frequency (reverses on the down leg if ping-pong). Use Pan home / Pan dest. Off: pan is free during the glide.',
   glidePanHome: 'Pan at the start of the up leg (−1 left … +1 right).',
   glidePanDest: 'Pan at destination. On ping-pong return, pan glides back to Pan home.',
 } as const;
