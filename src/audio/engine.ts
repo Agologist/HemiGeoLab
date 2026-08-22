@@ -155,54 +155,101 @@ export function harmonicHz(f0: number, order: number): number {
  * Multi-channel Web Audio: fundamental + dynamic harmonics, phase via delay, stereo pan.
  * Geometry uses the same partial list (see signal/model.ts).
  */
+/** Per-channel trim so a stack of sines doesn't clip, but a single voice is still audible. */
+const CHANNEL_HEAD = 0.5;
+
 export class HemiAudioEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private channels = new Map<number, ChannelNodes>();
   private playing = false;
+  private stopTimer: number | null = null;
+  private targetMaster = 0.35;
 
   isPlaying() {
     return this.playing;
   }
 
-  async ensureContext() {
+  /** Call synchronously from a click/tap before any await — unlocks autoplay. */
+  unlock() {
     if (!this.ctx) {
       this.ctx = new AudioContext();
       this.master = this.ctx.createGain();
       this.master.gain.value = 0;
       this.master.connect(this.ctx.destination);
     }
-    if (this.ctx.state === 'suspended') await this.ctx.resume();
+    if (this.ctx.state !== 'running') void this.ctx.resume();
+  }
+
+  async ensureContext() {
+    this.unlock();
+    if (!this.ctx) throw new Error('Could not create audio context');
+    if (this.ctx.state !== 'running') await this.ctx.resume();
     return this.ctx;
   }
 
+  private cancelStopTimer() {
+    if (this.stopTimer != null) {
+      window.clearTimeout(this.stopTimer);
+      this.stopTimer = null;
+    }
+  }
+
+  private applyMaster(gain: number, rampSec = 0) {
+    if (!this.ctx || !this.master) return;
+    const now = this.ctx.currentTime;
+    const v = clamp01(gain);
+    this.targetMaster = v;
+    this.master.gain.cancelScheduledValues(now);
+    if (rampSec > 0) {
+      const from = Math.max(this.master.gain.value, 0.0001);
+      this.master.gain.setValueAtTime(from, now);
+      this.master.gain.linearRampToValueAtTime(v, now + rampSec);
+    } else {
+      this.master.gain.setValueAtTime(v, now);
+    }
+  }
+
   async start(states: ChannelState[], masterGain: number) {
+    this.cancelStopTimer();
     const ctx = await this.ensureContext();
     if (!this.master) return;
     this.stopNodes();
-
-    const now = ctx.currentTime;
-    this.master.gain.cancelScheduledValues(now);
-    this.master.gain.setValueAtTime(this.master.gain.value, now);
-    this.master.gain.linearRampToValueAtTime(clamp01(masterGain), now + 0.35);
-
+    this.applyMaster(masterGain);
     for (const ch of states) this.spawnChannel(ch);
     this.playing = true;
+    if (ctx.state !== 'running') {
+      throw new Error(`Audio blocked (context is ${ctx.state}). Click Play again.`);
+    }
+  }
+
+  /** Start audio if idle, or resume + update if already playing. */
+  async ensurePlaying(states: ChannelState[], masterGain: number) {
+    const ctx = await this.ensureContext();
+    const dead = !this.playing || this.channels.size === 0;
+    if (dead) {
+      await this.start(states, masterGain);
+      return;
+    }
+    this.applyMaster(masterGain);
+    this.updateAll(states);
+    if (ctx.state !== 'running') {
+      throw new Error(`Audio blocked (context is ${ctx.state}). Click Play again.`);
+    }
   }
 
   stop() {
+    this.cancelStopTimer();
     if (!this.ctx || !this.master) {
       this.playing = false;
       return;
     }
-    const now = this.ctx.currentTime;
-    this.master.gain.cancelScheduledValues(now);
-    this.master.gain.setValueAtTime(this.master.gain.value, now);
-    this.master.gain.linearRampToValueAtTime(0, now + 0.3);
-    window.setTimeout(() => {
+    this.applyMaster(0, 0.12);
+    this.stopTimer = window.setTimeout(() => {
       this.stopNodes();
       this.playing = false;
-    }, 320);
+      this.stopTimer = null;
+    }, 180);
   }
 
   private stopNodes() {
@@ -223,7 +270,7 @@ export class HemiAudioEngine {
     pan.pan.value = clamp(ch.pan, -1, 1);
     pan.connect(this.master);
 
-    const head = 0.2;
+    const head = CHANNEL_HEAD;
     const partials: PartialNodes[] = [];
 
     const fundGain = ch.muted ? 0 : ch.gain * head;
@@ -299,16 +346,15 @@ export class HemiAudioEngine {
       });
 
     if (needRebuild) {
-      const masterVal = this.master?.gain.value ?? 0.35;
       this.stopNodes();
       for (const ch of states) this.spawnChannel(ch);
-      if (this.master) this.master.gain.value = masterVal;
+      this.applyMaster(this.targetMaster);
       return;
     }
 
     void signature;
     const t = this.ctx.currentTime;
-    const head = 0.2;
+    const head = CHANNEL_HEAD;
     for (const ch of states) {
       const n = this.channels.get(ch.id);
       if (!n) {
@@ -360,8 +406,9 @@ export class HemiAudioEngine {
   }
 
   setMasterGain(value: number) {
+    this.targetMaster = clamp01(value);
     if (this.master && this.ctx && this.playing) {
-      this.master.gain.setTargetAtTime(clamp01(value), this.ctx.currentTime, 0.05);
+      this.applyMaster(this.targetMaster);
     }
   }
 }

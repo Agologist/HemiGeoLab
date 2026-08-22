@@ -73,13 +73,15 @@ function migrateChannels(channels: ChannelState[]): ChannelState[] {
 
 export default function App() {
   const [channels, setChannels] = useState<ChannelState[]>(defaultChannels);
-  const [master, setMaster] = useState(0.35);
+  const [master, setMaster] = useState(0.5);
   const [playing, setPlaying] = useState(false);
   const [carrier, setCarrier] = useState(200);
   const [beat, setBeat] = useState(10);
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<SignalAnalysis>(() => analyzeSignal(defaultChannels()));
   const [findings, setFindings] = useState<Finding[]>(loadFindings);
+  /** True after Unison Go all until the course ends or Stop all. */
+  const unisonSessionRef = useRef(false);
 
   const beatHz = useMemo(() => {
     const a = channels.filter((c) => !c.muted && c.gain > 0.02);
@@ -127,6 +129,12 @@ export default function App() {
     });
   }, []);
 
+  const stopOutput = useCallback(() => {
+    unisonSessionRef.current = false;
+    engine.stop();
+    setPlaying(false);
+  }, []);
+
   // Drive optional home→destination frequency glides
   useEffect(() => {
     let raf = 0;
@@ -138,6 +146,12 @@ export default function App() {
         if (!next) return prev;
         setAnalysis(analyzeSignal(next));
         if (engine.isPlaying()) engine.updateAll(next);
+        const stillRunning = next.some((c) => c.glide?.running);
+        if (!stillRunning && unisonSessionRef.current) {
+          unisonSessionRef.current = false;
+          engine.stop();
+          setPlaying(false);
+        }
         return next;
       });
     };
@@ -155,10 +169,11 @@ export default function App() {
     pushChannels(removeChannel(channels, id));
   };
 
-  const onPlay = async () => {
+  const startAudio = async (states: ChannelState[]) => {
+    engine.unlock();
     setError(null);
     try {
-      await engine.start(channels, master);
+      await engine.ensurePlaying(states, master);
       setPlaying(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not start audio');
@@ -166,19 +181,41 @@ export default function App() {
     }
   };
 
-  const onStop = () => {
-    engine.stop();
-    setPlaying(false);
+  const onPlay = async () => {
+    await startAudio(channels);
   };
 
-  const onGoAllGlides = () => {
-    if (glideReady === 0) return;
-    pushChannels(startEnabledGlides(channels));
+  const onStop = () => {
+    setChannels((prev) => {
+      const next = stopAllGlides(prev);
+      setAnalysis(analyzeSignal(next));
+      return next;
+    });
+    stopOutput();
+  };
+
+  const onGoAllGlides = async () => {
+    if (glideReady === 0 || glideRunning > 0) return;
+    unisonSessionRef.current = true;
+    const next = startEnabledGlides(channels);
+    setChannels(next);
+    setAnalysis(analyzeSignal(next));
+    await startAudio(next);
   };
 
   const onStopAllGlides = () => {
     if (glideRunning === 0) return;
-    pushChannels(stopAllGlides(channels));
+    const next = stopAllGlides(channels);
+    setChannels(next);
+    setAnalysis(analyzeSignal(next));
+    stopOutput();
+  };
+
+  const onGoChannelGlide = async (id: number) => {
+    const next = channels.map((c) => (c.id === id ? startGlide(c) : c));
+    setChannels(next);
+    setAnalysis(analyzeSignal(next));
+    await startAudio(next);
   };
 
   const markFinding = () => {
@@ -211,10 +248,16 @@ export default function App() {
           <p className="tagline">
             Signal-true vector scope — freqs, phase, harmonics & pan create the figure
           </p>
+          {error && <p className="error header-error">{error}</p>}
         </div>
         <div className="header-actions">
           {!playing ? (
-            <button type="button" className="btn primary" onClick={onPlay}>
+            <button
+              type="button"
+              className="btn primary"
+              onPointerDown={() => engine.unlock()}
+              onClick={() => void onPlay()}
+            >
               Play
             </button>
           ) : (
@@ -229,13 +272,16 @@ export default function App() {
             <button
               type="button"
               className="btn"
-              disabled={glideReady === 0}
+              disabled={glideReady === 0 || glideRunning > 0}
               title={
-                glideReady === 0
-                  ? 'Enable Frequency glide on at least one channel'
-                  : `Start ${glideReady} enabled channel${glideReady === 1 ? '' : 's'} together`
+                glideRunning > 0
+                  ? 'Glide in progress — wait until it finishes or press Stop all'
+                  : glideReady === 0
+                    ? 'Enable Frequency glide on at least one channel'
+                    : `Start ${glideReady} enabled channel${glideReady === 1 ? '' : 's'} together`
               }
-              onClick={onGoAllGlides}
+              onPointerDown={() => engine.unlock()}
+              onClick={() => void onGoAllGlides()}
             >
               Go all
             </button>
@@ -429,6 +475,10 @@ export default function App() {
                     key={ch.id}
                     ch={ch}
                     onChange={updateChannel}
+                    onGoGlide={() => {
+                      engine.unlock();
+                      void onGoChannelGlide(ch.id);
+                    }}
                     onRemove={() => onRemoveChannel(ch.id)}
                     canRemove={channels.length > MIN_CHANNELS}
                   />
@@ -471,11 +521,13 @@ export default function App() {
 function ChannelStrip({
   ch,
   onChange,
+  onGoGlide,
   onRemove,
   canRemove,
 }: {
   ch: ChannelState;
   onChange: (id: number, patch: Partial<ChannelState>) => void;
+  onGoGlide: () => void;
   onRemove: () => void;
   canRemove: boolean;
 }) {
@@ -807,7 +859,7 @@ function ChannelStrip({
                 <button
                   type="button"
                   className="btn btn-small"
-                  onClick={() => onChange(ch.id, startGlide(ch))}
+                  onClick={onGoGlide}
                 >
                   Go
                 </button>
@@ -993,7 +1045,7 @@ const TIPS = {
   glide:
     'Optional: ramp f0 from Home to Destination. Off by default. With ping-pong, it loops back using Down time. Harmonics stay n×f0; geometry follows live f0. Use Go on a channel, or Unison glide at the top to start every enabled channel together.',
   unisonGlide:
-    'Starts every channel that has Frequency glide checked, on the same clock — they all jump to Home and ramp together. Each channel keeps its own Home, Dest, times, curve, and pan-link. Per-channel Go still works for one voice. Stop all ends every running glide.',
+    'Go all starts audio and ramps every Frequency-glide channel on the same clock. The button stays off until the course finishes (one-shot) or you press Stop all. Stop all (or the end of the course) also silences audio. Ping-pong keeps going until Stop all. Per-channel Go still works for one voice.',
   glideHome: 'Starting frequency (Hz) when you press Go. f0 jumps here, then ramps toward Destination (up leg).',
   glideDest: 'Far frequency (Hz). One-shot ends here; ping-pong turns around and returns to Home.',
   glideTimeUp: 'Duration of the Home → Destination leg (seconds).',

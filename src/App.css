@@ -708,6 +708,11 @@ h2 {
   margin-bottom: 0.5rem;
 }
 
+.header-error {
+  margin: 0.35rem 0 0;
+  display: inline-block;
+}
+
 /* Stack on narrow screens */
 @media (max-width: 900px) {
   .app {
