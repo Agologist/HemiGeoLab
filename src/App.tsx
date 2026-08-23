@@ -32,6 +32,19 @@ import {
   snapToSimpleRatio,
   type SignalAnalysis,
 } from './signal/model';
+import {
+  combineLocal,
+  formatCountdown,
+  formatWhen,
+  localDateISO,
+  localTimeHM,
+  nextScheduledFire,
+  requestBrowserLocation,
+  sunTimesForDate,
+  type GeoPlace,
+  type RepeatMode,
+  type SunMode,
+} from './solar';
 import './App.css';
 
 const FINDINGS_KEY = 'hemi-geometry-findings';
@@ -80,8 +93,28 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<SignalAnalysis>(() => analyzeSignal(defaultChannels()));
   const [findings, setFindings] = useState<Finding[]>(loadFindings);
-  /** True after Unison Go all until the course ends or Stop all. */
+  /** True after Unison Go all until the course ends (no hold) or Stop all. */
   const unisonSessionRef = useRef(false);
+  const [unisonActive, setUnisonActive] = useState(false);
+  const [hold, setHold] = useState(false);
+  const [holdSec, setHoldSec] = useState(8);
+  const holdRef = useRef(false);
+  const holdSecRef = useRef(8);
+  holdRef.current = hold;
+  holdSecRef.current = holdSec;
+
+  const [schedDate, setSchedDate] = useState(() => localDateISO());
+  const [schedTime, setSchedTime] = useState(() => localTimeHM(new Date()));
+  const [schedRepeat, setSchedRepeat] = useState<RepeatMode>('once');
+  const [sunMode, setSunMode] = useState<SunMode>('sunset');
+  const [place, setPlace] = useState<GeoPlace | null>(null);
+  const [geoMsg, setGeoMsg] = useState<string | null>(null);
+  const [sunTimes, setSunTimes] = useState<{ sunrise: Date; sunset: Date } | null>(null);
+  const [armedAt, setArmedAt] = useState<Date | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+
+  const channelsRef = useRef(channels);
+  channelsRef.current = channels;
 
   const beatHz = useMemo(() => {
     const a = channels.filter((c) => !c.muted && c.gain > 0.02);
@@ -97,7 +130,6 @@ export default function App() {
     () => channels.filter((c) => c.glide?.running).length,
     [channels],
   );
-
   const pushChannels = useCallback((next: ChannelState[]) => {
     setChannels(next);
     setAnalysis(analyzeSignal(next));
@@ -131,6 +163,7 @@ export default function App() {
 
   const stopOutput = useCallback(() => {
     unisonSessionRef.current = false;
+    setUnisonActive(false);
     engine.stop();
     setPlaying(false);
   }, []);
@@ -142,13 +175,17 @@ export default function App() {
       raf = requestAnimationFrame(loop);
       setChannels((prev) => {
         if (!prev.some((c) => c.glide?.running)) return prev;
-        const next = tickGlides(prev, now);
+        const next = tickGlides(prev, now, {
+          enabled: holdRef.current,
+          seconds: holdSecRef.current,
+        });
         if (!next) return prev;
         setAnalysis(analyzeSignal(next));
         if (engine.isPlaying()) engine.updateAll(next);
         const stillRunning = next.some((c) => c.glide?.running);
         if (!stillRunning && unisonSessionRef.current) {
           unisonSessionRef.current = false;
+          setUnisonActive(false);
           engine.stop();
           setPlaying(false);
         }
@@ -169,17 +206,20 @@ export default function App() {
     pushChannels(removeChannel(channels, id));
   };
 
-  const startAudio = async (states: ChannelState[]) => {
+  const masterRef = useRef(master);
+  masterRef.current = master;
+
+  const startAudio = useCallback(async (states: ChannelState[]) => {
     engine.unlock();
     setError(null);
     try {
-      await engine.ensurePlaying(states, master);
+      await engine.ensurePlaying(states, masterRef.current);
       setPlaying(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not start audio');
       setPlaying(false);
     }
-  };
+  }, []);
 
   const onPlay = async () => {
     await startAudio(channels);
@@ -194,21 +234,131 @@ export default function App() {
     stopOutput();
   };
 
-  const onGoAllGlides = async () => {
-    if (glideReady === 0 || glideRunning > 0) return;
+  const onGoAllGlides = useCallback(async () => {
+    const ch = channelsRef.current;
+    if (!ch.some((c) => c.glide?.enabled) || ch.some((c) => c.glide?.running)) return;
     unisonSessionRef.current = true;
-    const next = startEnabledGlides(channels);
+    setUnisonActive(true);
+    const next = startEnabledGlides(ch);
     setChannels(next);
     setAnalysis(analyzeSignal(next));
     await startAudio(next);
-  };
+  }, [startAudio]);
 
   const onStopAllGlides = () => {
-    if (glideRunning === 0) return;
-    const next = stopAllGlides(channels);
+    if (glideRunning === 0 && !unisonActive) return;
+    const next = stopAllGlides(channelsRef.current);
     setChannels(next);
     setAnalysis(analyzeSignal(next));
     stopOutput();
+  };
+
+  const sessionBusy = glideRunning > 0 || unisonActive;
+
+  const applySunTime = useCallback(
+    async (kind: 'sunrise' | 'sunset') => {
+      engine.unlock();
+      engine.armScheduler();
+      setGeoMsg('Getting sun time…');
+      let loc = place;
+      if (!loc) {
+        try {
+          loc = await requestBrowserLocation();
+          setPlace(loc);
+        } catch {
+          setGeoMsg('Allow location when the browser asks, then click Sunset/Sunrise again.');
+          return;
+        }
+      }
+      const times = sunTimesForDate(loc.lat, loc.lon, schedDate);
+      if (!times) {
+        setGeoMsg(`Could not get ${kind} for that date.`);
+        return;
+      }
+      setSunTimes(times);
+      const at = kind === 'sunrise' ? times.sunrise : times.sunset;
+      setSunMode(kind);
+      setSchedTime(localTimeHM(at));
+      setGeoMsg(null);
+    },
+    [place, schedDate],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void requestBrowserLocation()
+      .then((p) => {
+        if (cancelled) return;
+        setPlace(p);
+        setGeoMsg(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setGeoMsg(e instanceof Error ? e.message : 'Location unavailable — click Locate or Sunset');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!place) {
+      setSunTimes(null);
+      return;
+    }
+    setSunTimes(sunTimesForDate(place.lat, place.lon, schedDate));
+  }, [place, schedDate]);
+
+  useEffect(() => {
+    if (sunMode === 'manual' || !sunTimes) return;
+    const at = sunMode === 'sunrise' ? sunTimes.sunrise : sunTimes.sunset;
+    setSchedTime(localTimeHM(at));
+  }, [sunTimes, sunMode]);
+
+  useEffect(() => {
+    if (!armedAt) return;
+    const id = window.setInterval(() => setNowTick(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, [armedAt]);
+
+  useEffect(() => {
+    if (!armedAt) return;
+    const delay = armedAt.getTime() - Date.now();
+    if (delay <= 0) {
+      engine.unlock();
+      void onGoAllGlides();
+      setArmedAt(null);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      engine.unlock();
+      void onGoAllGlides();
+      setArmedAt(null);
+      if (schedRepeat === 'daily') {
+        const again = nextScheduledFire({
+          dateISO: schedDate,
+          timeHM: schedTime,
+          repeat: 'daily',
+          sun: sunMode,
+          place,
+        });
+        if (again) setArmedAt(again);
+      }
+    }, Math.min(delay, 2_000_000_000));
+    return () => window.clearTimeout(id);
+  }, [armedAt, onGoAllGlides, schedRepeat, schedDate, schedTime, sunMode, place]);
+
+  const onSetSchedule = () => {
+    engine.unlock();
+    engine.armScheduler();
+    const intended = combineLocal(schedDate, schedTime);
+    if (intended.getTime() <= Date.now()) {
+      setArmedAt(null);
+      setGeoMsg('That time already passed');
+      return;
+    }
+    setArmedAt(intended);
+    setGeoMsg(null);
   };
 
   const onGoChannelGlide = async (id: number) => {
@@ -266,45 +416,157 @@ export default function App() {
             </button>
           )}
           <div className="unison-glide">
-            <span className="unison-glide-label">
-              Unison glide <Tip text={TIPS.unisonGlide} />
-            </span>
-            <button
-              type="button"
-              className="btn"
-              disabled={glideReady === 0 || glideRunning > 0}
-              title={
-                glideRunning > 0
-                  ? 'Glide in progress — wait until it finishes or press Stop all'
-                  : glideReady === 0
+            {sessionBusy ? (
+              <button
+                type="button"
+                className="btn stop"
+                title="Stop glides and audio"
+                onClick={onStopAllGlides}
+              >
+                Stop all
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn"
+                disabled={glideReady === 0}
+                title={
+                  glideReady === 0
                     ? 'Enable Frequency glide on at least one channel'
                     : `Start ${glideReady} enabled channel${glideReady === 1 ? '' : 's'} together`
-              }
-              onPointerDown={() => engine.unlock()}
-              onClick={() => void onGoAllGlides()}
-            >
-              Go all
-            </button>
-            <button
-              type="button"
-              className="btn"
-              disabled={glideRunning === 0}
-              title={
-                glideRunning === 0
-                  ? 'No glide is running'
-                  : `Stop ${glideRunning} running glide${glideRunning === 1 ? '' : 's'}`
-              }
-              onClick={onStopAllGlides}
-            >
-              Stop all
-            </button>
+                }
+                onPointerDown={() => engine.unlock()}
+                onClick={() => void onGoAllGlides()}
+              >
+                Go all
+              </button>
+            )}
+            <label className="hold-toggle" title={TIPS.hold}>
+              <input
+                type="checkbox"
+                checked={hold}
+                onChange={(e) => setHold(e.target.checked)}
+              />
+              Hold
+            </label>
+            <label className="hold-sec" title="Seconds to stay at dest, and at home if ping-pong is on">
+              <input
+                type="number"
+                min={0}
+                max={3600}
+                step={0.5}
+                value={holdSec}
+                disabled={!hold}
+                onChange={(e) => setHoldSec(Math.max(0, Number(e.target.value)))}
+              />
+              s
+            </label>
             <span className="unison-glide-count">
               {glideReady} ready
               {glideRunning > 0 ? ` · ${glideRunning} running` : ''}
+              {hold && unisonActive && glideRunning === 0 ? ' · holding' : ''}
             </span>
           </div>
         </div>
       </header>
+      <div
+        className="schedule-bar"
+        onPointerDown={() => {
+          engine.unlock();
+          engine.armScheduler();
+        }}
+      >
+        <label className="sched-field">
+          <span>Date</span>
+          <input
+            type="date"
+            value={schedDate}
+            onChange={(e) => setSchedDate(e.target.value)}
+          />
+        </label>
+        <label className="sched-field">
+          <span>Time</span>
+          <input
+            type="time"
+            step="1"
+            value={schedTime.length === 5 ? `${schedTime}:00` : schedTime}
+            onChange={(e) => {
+              setSunMode('manual');
+              setSchedTime(e.target.value);
+            }}
+          />
+        </label>
+        <select
+          className="sched-select"
+          value={schedRepeat}
+          onChange={(e) => setSchedRepeat(e.target.value as RepeatMode)}
+          aria-label="Repeat"
+        >
+          <option value="once">Once</option>
+          <option value="daily">Daily</option>
+        </select>
+        <button
+          type="button"
+          className={`btn btn-small ${sunMode === 'sunset' ? 'on' : ''}`}
+          title="Set the time box to local sunset for this date and location"
+          onClick={() => void applySunTime('sunset')}
+        >
+          Sunset{sunTimes ? ` ${localTimeHM(sunTimes.sunset)}` : ''}
+        </button>
+        <button
+          type="button"
+          className={`btn btn-small ${sunMode === 'sunrise' ? 'on' : ''}`}
+          title="Set the time box to local sunrise for this date and location"
+          onClick={() => void applySunTime('sunrise')}
+        >
+          Sunrise{sunTimes ? ` ${localTimeHM(sunTimes.sunrise)}` : ''}
+        </button>
+        <button
+          type="button"
+          className="btn btn-small"
+          title="Lock this date/time and start the countdown to Go all"
+          onClick={onSetSchedule}
+        >
+          Set
+        </button>
+        {armedAt && (
+          <button
+            type="button"
+            className="btn btn-small"
+            title="Cancel the scheduled Go all"
+            onClick={() => {
+              setArmedAt(null);
+              setGeoMsg(null);
+            }}
+          >
+            Clear
+          </button>
+        )}
+        <button
+          type="button"
+          className="btn btn-small"
+          onClick={() => {
+            void requestBrowserLocation()
+              .then((p) => {
+                setPlace(p);
+                setGeoMsg(null);
+              })
+              .catch((err) => setGeoMsg(err instanceof Error ? err.message : 'Location denied'));
+          }}
+        >
+          Locate
+        </button>
+        {armedAt && (
+          <span className="sched-countdown" aria-live="polite">
+            {formatCountdown(armedAt.getTime() - nowTick)}
+          </span>
+        )}
+        <span className="sched-status">
+          {place ? place.label : 'No location'}
+          {armedAt ? ` · Go all ${formatWhen(armedAt)} · keep tab open` : ' · Set to start countdown'}
+          {geoMsg ? ` · ${geoMsg}` : ''}
+        </span>
+      </div>
 
       <div className="workspace">
         {/* ~70% visualizer */}
@@ -905,7 +1167,9 @@ function ChannelStrip({
             </div>
             {ch.glide.running && (
               <p className="glide-status">
-                {ch.glide.leg === 'up' ? (
+                {ch.glide.leg === 'hold' ? (
+                  <>Hold {ch.glide.holdNext === 'up' ? 'home' : 'dest'}</>
+                ) : ch.glide.leg === 'up' ? (
                   <>↑ Home → Dest ({ch.glide.durationUpSec}s)</>
                 ) : (
                   <>↓ Dest → Home ({ch.glide.durationDownSec}s)</>
@@ -1044,8 +1308,7 @@ const TIPS = {
     'Overtones at integer multiples of f0 (H2 = 2×f0, H3 = 3×f0, …). Each shows its Hz and level. They fold the path denser while staying locked to the fundamental.',
   glide:
     'Optional: ramp f0 from Home to Destination. Off by default. With ping-pong, it loops back using Down time. Harmonics stay n×f0; geometry follows live f0. Use Go on a channel, or Unison glide at the top to start every enabled channel together.',
-  unisonGlide:
-    'Go all starts audio and ramps every Frequency-glide channel on the same clock. The button stays off until the course finishes (one-shot) or you press Stop all. Stop all (or the end of the course) also silences audio. Ping-pong keeps going until Stop all. Per-channel Go still works for one voice.',
+  hold: 'After a glide reaches dest (or home, on ping-pong), stay on that frequency for the seconds in the box, then continue. Ping-pong keeps looping until Stop all.',
   glideHome: 'Starting frequency (Hz) when you press Go. f0 jumps here, then ramps toward Destination (up leg).',
   glideDest: 'Far frequency (Hz). One-shot ends here; ping-pong turns around and returns to Home.',
   glideTimeUp: 'Duration of the Home → Destination leg (seconds).',

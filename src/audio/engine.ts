@@ -22,8 +22,12 @@ export interface GlideState {
   durationDownSec: number;
   /** Loop: home→dest→home→… until Stop */
   pingPong: boolean;
-  /** Current leg while running */
-  leg: 'up' | 'down';
+  /** Current leg while running (`hold` = parked at an endpoint) */
+  leg: 'up' | 'down' | 'hold';
+  /** When `leg === 'hold'`, resume this after holdUntilMs */
+  holdNext: 'up' | 'down' | 'stop' | null;
+  /** performance.now() deadline for the hold; Infinity = until Stop all */
+  holdUntilMs: number | null;
   /** linear Hz vs equal-log (musical) steps */
   curve: 'linear' | 'log';
   /** Also move pan with the same progress u as frequency */
@@ -62,6 +66,8 @@ export function defaultGlide(f0 = 200, pan = 0): GlideState {
     durationDownSec: 8,
     pingPong: false,
     leg: 'up',
+    holdNext: null,
+    holdUntilMs: null,
     curve: 'log',
     linkPan: false,
     panHome: clampPan(pan),
@@ -93,7 +99,9 @@ export function normalizeGlide(
     durationUpSec: Math.max(0.1, up),
     durationDownSec: Math.max(0.1, down),
     pingPong: !!raw.pingPong,
-    leg: raw.leg === 'down' ? 'down' : 'up',
+    leg: raw.leg === 'hold' ? 'hold' : raw.leg === 'down' ? 'down' : 'up',
+    holdNext: raw.holdNext === 'up' || raw.holdNext === 'down' || raw.holdNext === 'stop' ? raw.holdNext : null,
+    holdUntilMs: typeof raw.holdUntilMs === 'number' ? raw.holdUntilMs : null,
     startedAtMs: raw.startedAtMs ?? null,
     running: !!raw.running,
     enabled: !!raw.enabled,
@@ -165,6 +173,7 @@ export class HemiAudioEngine {
   private playing = false;
   private stopTimer: number | null = null;
   private targetMaster = 0.35;
+  private keepAliveOsc: OscillatorNode | null = null;
 
   isPlaying() {
     return this.playing;
@@ -179,6 +188,20 @@ export class HemiAudioEngine {
       this.master.connect(this.ctx.destination);
     }
     if (this.ctx.state !== 'running') void this.ctx.resume();
+  }
+
+  /** Silent oscillator so a later scheduled Go all can still start audio. */
+  armScheduler() {
+    this.unlock();
+    if (!this.ctx || this.keepAliveOsc) return;
+    const osc = this.ctx.createOscillator();
+    const g = this.ctx.createGain();
+    g.gain.value = 0;
+    osc.frequency.value = 20;
+    osc.connect(g);
+    g.connect(this.ctx.destination);
+    osc.start();
+    this.keepAliveOsc = osc;
   }
 
   async ensureContext() {
@@ -485,6 +508,8 @@ export function startGlide(ch: ChannelState, nowMs: number = performance.now()):
       enabled: true,
       running: true,
       leg: 'up',
+      holdNext: null,
+      holdUntilMs: null,
       homeHz: home,
       destHz: dest,
       durationUpSec: Math.max(0.1, g.durationUpSec),
@@ -503,6 +528,8 @@ export function stopGlide(ch: ChannelState): ChannelState {
       ...normalizeGlide(ch.glide, ch.frequency, ch.pan),
       running: false,
       leg: 'up',
+      holdNext: null,
+      holdUntilMs: null,
       startedAtMs: null,
     },
   };
@@ -521,6 +548,12 @@ export function stopAllGlides(channels: ChannelState[]): ChannelState[] {
   return channels.map((ch) => (ch.glide?.running ? stopGlide(ch) : ch));
 }
 
+export interface HoldPolicy {
+  enabled: boolean;
+  /** Seconds to park at dest (and at home if ping-pong) before the next leg. */
+  seconds: number;
+}
+
 function applyLegEnd(
   ch: ChannelState,
   g: GlideState,
@@ -534,24 +567,93 @@ function applyLegEnd(
       ...ch,
       frequency: freq,
       pan: g.linkPan ? pan : ch.pan,
-      glide: { ...g, running: false, leg: 'up' as const, startedAtMs: null },
+      glide: {
+        ...g,
+        running: false,
+        leg: 'up' as const,
+        holdNext: null,
+        holdUntilMs: null,
+        startedAtMs: null,
+      },
     };
   }
   return {
     ...ch,
     frequency: freq,
     pan: g.linkPan ? pan : ch.pan,
-    glide: { ...g, leg: nextLeg, startedAtMs: nowMs },
+    glide: { ...g, leg: nextLeg, holdNext: null, holdUntilMs: null, startedAtMs: nowMs },
   };
 }
 
+function beginHold(
+  ch: ChannelState,
+  g: GlideState,
+  freq: number,
+  pan: number,
+  holdNext: 'up' | 'down' | 'stop',
+  untilMs: number,
+  nowMs: number,
+): ChannelState {
+  return {
+    ...ch,
+    frequency: freq,
+    pan: g.linkPan ? pan : ch.pan,
+    glide: {
+      ...g,
+      running: true,
+      leg: 'hold',
+      holdNext,
+      holdUntilMs: untilMs,
+      startedAtMs: nowMs,
+    },
+  };
+}
+
+function holdPark(g: GlideState): { freq: number; pan: number } {
+  const atDest = g.holdNext !== 'up';
+  return {
+    freq: Math.max(20, atDest ? g.destHz : g.homeHz),
+    pan: clampPan(atDest ? g.panDest : g.panHome),
+  };
+}
+
+function maybeHold(
+  ch: ChannelState,
+  g: GlideState,
+  freq: number,
+  pan: number,
+  nextLeg: 'up' | 'down' | 'stop',
+  nowMs: number,
+  hold?: HoldPolicy,
+): ChannelState {
+  if (!hold?.enabled) return applyLegEnd(ch, g, freq, pan, nextLeg, nowMs);
+  const sec = Math.max(0, hold.seconds);
+  if (sec <= 0) return applyLegEnd(ch, g, freq, pan, nextLeg, nowMs);
+  return beginHold(ch, g, freq, pan, nextLeg, nowMs + sec * 1000, nowMs);
+}
+
 /** Advance all running glides; returns null if nothing changed. */
-export function tickGlides(channels: ChannelState[], nowMs: number): ChannelState[] | null {
+export function tickGlides(
+  channels: ChannelState[],
+  nowMs: number,
+  hold?: HoldPolicy,
+): ChannelState[] | null {
   let any = false;
   const next = channels.map((ch) => {
     const g = ch.glide;
     if (!g?.running || g.startedAtMs == null) return ch;
     any = true;
+
+    if (g.leg === 'hold') {
+      const park = holdPark(g);
+      const p = g.linkPan ? park.pan : ch.pan;
+      const until = g.holdUntilMs ?? nowMs;
+      const keepHolding = hold?.enabled !== false && nowMs < until;
+      if (keepHolding) return { ...ch, frequency: park.freq, pan: p };
+      const resume = g.holdNext ?? 'stop';
+      return applyLegEnd(ch, g, park.freq, p, resume, nowMs);
+    }
+
     const leg = g.leg === 'down' ? 'down' : 'up';
     const durMs =
       Math.max(0.1, leg === 'up' ? g.durationUpSec : g.durationDownSec) * 1000;
@@ -559,15 +661,15 @@ export function tickGlides(channels: ChannelState[], nowMs: number): ChannelStat
 
     if (u >= 1) {
       if (leg === 'up') {
-        if (g.pingPong) {
-          return applyLegEnd(ch, g, Math.max(20, g.destHz), clampPan(g.panDest), 'down', nowMs);
-        }
-        return applyLegEnd(ch, g, Math.max(20, g.destHz), clampPan(g.panDest), 'stop', nowMs);
+        const f = Math.max(20, g.destHz);
+        const p = clampPan(g.panDest);
+        if (g.pingPong) return maybeHold(ch, g, f, p, 'down', nowMs, hold);
+        return maybeHold(ch, g, f, p, 'stop', nowMs, hold);
       }
-      if (g.pingPong) {
-        return applyLegEnd(ch, g, Math.max(20, g.homeHz), clampPan(g.panHome), 'up', nowMs);
-      }
-      return applyLegEnd(ch, g, Math.max(20, g.homeHz), clampPan(g.panHome), 'stop', nowMs);
+      const f = Math.max(20, g.homeHz);
+      const p = clampPan(g.panHome);
+      if (g.pingPong) return maybeHold(ch, g, f, p, 'up', nowMs, hold);
+      return maybeHold(ch, g, f, p, 'stop', nowMs, hold);
     }
 
     const f =
