@@ -106,7 +106,11 @@ export default function App() {
   const [schedDate, setSchedDate] = useState(() => localDateISO());
   const [schedTime, setSchedTime] = useState(() => localTimeHM(new Date()));
   const [schedRepeat, setSchedRepeat] = useState<RepeatMode>('once');
-  const [sunMode, setSunMode] = useState<SunMode>('sunset');
+  const [sunMode, setSunMode] = useState<SunMode>('manual');
+  const [dailyAt, setDailyAt] = useState<'time' | 'sunrise' | 'sunset'>('time');
+  const [leadMode, setLeadMode] = useState<'on-time' | 'before'>('on-time');
+  const [leadMin, setLeadMin] = useState(1);
+  const [leadSec, setLeadSec] = useState(0);
   const [place, setPlace] = useState<GeoPlace | null>(null);
   const [geoMsg, setGeoMsg] = useState<string | null>(null);
   const [sunTimes, setSunTimes] = useState<{ sunrise: Date; sunset: Date } | null>(null);
@@ -115,6 +119,7 @@ export default function App() {
 
   const channelsRef = useRef(channels);
   channelsRef.current = channels;
+  const seedsRef = useRef<HTMLDetailsElement>(null);
 
   const beatHz = useMemo(() => {
     const a = channels.filter((c) => !c.muted && c.gain > 0.02);
@@ -259,6 +264,7 @@ export default function App() {
     async (kind: 'sunrise' | 'sunset') => {
       engine.unlock();
       engine.armScheduler();
+      setSunMode(kind);
       setGeoMsg('Getting sun time…');
       let loc = place;
       if (!loc) {
@@ -277,7 +283,6 @@ export default function App() {
       }
       setSunTimes(times);
       const at = kind === 'sunrise' ? times.sunrise : times.sunset;
-      setSunMode(kind);
       setSchedTime(localTimeHM(at));
       setGeoMsg(null);
     },
@@ -339,20 +344,66 @@ export default function App() {
           dateISO: schedDate,
           timeHM: schedTime,
           repeat: 'daily',
-          sun: sunMode,
+          sun: dailyAt === 'time' ? 'manual' : dailyAt,
           place,
+          leadMs: leadMode === 'before' ? (Math.max(0, leadMin) * 60 + Math.max(0, leadSec)) * 1000 : 0,
         });
         if (again) setArmedAt(again);
       }
     }, Math.min(delay, 2_000_000_000));
     return () => window.clearTimeout(id);
-  }, [armedAt, onGoAllGlides, schedRepeat, schedDate, schedTime, sunMode, place]);
+  }, [armedAt, onGoAllGlides, schedRepeat, schedDate, schedTime, sunMode, dailyAt, place, leadMode, leadMin, leadSec]);
+
+  const leadMs =
+    leadMode === 'before' ? (Math.max(0, leadMin) * 60 + Math.max(0, leadSec)) * 1000 : 0;
 
   const onSetSchedule = () => {
     engine.unlock();
     engine.armScheduler();
-    const intended = combineLocal(schedDate, schedTime);
+    const followSun =
+      schedRepeat === 'daily' && (dailyAt === 'sunrise' || dailyAt === 'sunset');
+
+    if (followSun) {
+      if (!place) {
+        setGeoMsg('Click Locate (or Sunset/Sunrise) so daily sun time can update.');
+        return;
+      }
+      const when = nextScheduledFire({
+        dateISO: schedDate,
+        timeHM: schedTime,
+        repeat: 'daily',
+        sun: dailyAt,
+        place,
+        leadMs,
+      });
+      if (!when) {
+        setGeoMsg('Could not get the next sunrise/sunset.');
+        return;
+      }
+      setArmedAt(when);
+      setGeoMsg(null);
+      return;
+    }
+
+    const intended = new Date(combineLocal(schedDate, schedTime).getTime() - leadMs);
     if (intended.getTime() <= Date.now()) {
+      if (schedRepeat === 'daily') {
+        const when = nextScheduledFire({
+          dateISO: schedDate,
+          timeHM: schedTime,
+          repeat: 'daily',
+          sun: 'manual',
+          place,
+          leadMs,
+        });
+        if (!when) {
+          setGeoMsg('That time already passed');
+          return;
+        }
+        setArmedAt(when);
+        setGeoMsg(null);
+        return;
+      }
       setArmedAt(null);
       setGeoMsg('That time already passed');
       return;
@@ -381,6 +432,7 @@ export default function App() {
     const next = [f, ...findings].slice(0, 24);
     setFindings(next);
     localStorage.setItem(FINDINGS_KEY, JSON.stringify(next));
+    if (seedsRef.current) seedsRef.current.open = true;
   };
 
   const loadFinding = (f: Finding) => pushChannels(migrateChannels(f.channels));
@@ -476,6 +528,7 @@ export default function App() {
           engine.armScheduler();
         }}
       >
+        <div className="schedule-row">
         <label className="sched-field">
           <span>Date</span>
           <input
@@ -491,25 +544,81 @@ export default function App() {
             step="1"
             value={schedTime.length === 5 ? `${schedTime}:00` : schedTime}
             onChange={(e) => {
-              setSunMode('manual');
               setSchedTime(e.target.value);
+              if (schedRepeat !== 'daily' || dailyAt === 'time') {
+                setSunMode('manual');
+              }
             }}
           />
         </label>
-        <select
-          className="sched-select"
-          value={schedRepeat}
-          onChange={(e) => setSchedRepeat(e.target.value as RepeatMode)}
-          aria-label="Repeat"
-        >
-          <option value="once">Once</option>
-          <option value="daily">Daily</option>
-        </select>
+        <div className="sched-check-cluster">
+          <div className="sched-checks sched-checks-stack">
+            <label className="sched-check">
+              <input
+                type="checkbox"
+                checked={schedRepeat === 'once'}
+                onChange={() => setSchedRepeat('once')}
+              />
+              <span>Once</span>
+            </label>
+            <label className="sched-check">
+              <input
+                type="checkbox"
+                checked={schedRepeat === 'daily'}
+                onChange={() => {
+                  setSchedRepeat('daily');
+                  if (dailyAt !== 'time' && dailyAt !== 'sunrise' && dailyAt !== 'sunset') {
+                    setDailyAt('time');
+                  }
+                }}
+              />
+              <span>Daily</span>
+            </label>
+          </div>
+          <div className="sched-checks sched-checks-stack">
+            <label
+              className="sched-check"
+              title="Same HH:MM:SS every day"
+            >
+              <input
+                type="checkbox"
+                disabled={schedRepeat !== 'daily'}
+                checked={schedRepeat === 'daily' && dailyAt === 'time'}
+                onChange={() => {
+                  setSchedRepeat('daily');
+                  setDailyAt('time');
+                  setSunMode('manual');
+                }}
+              />
+              <span>Time</span>
+            </label>
+            <label
+              className="sched-check"
+              title="Fire at sunset or sunrise; the clock updates each day. Use the Sunset / Sunrise buttons to choose which."
+            >
+              <input
+                type="checkbox"
+                disabled={schedRepeat !== 'daily'}
+                checked={schedRepeat === 'daily' && dailyAt !== 'time'}
+                onChange={() => {
+                  setSchedRepeat('daily');
+                  const kind = sunMode === 'sunrise' ? 'sunrise' : 'sunset';
+                  setDailyAt(kind);
+                  void applySunTime(kind);
+                }}
+              />
+              <span>Sunset/rise</span>
+            </label>
+          </div>
+        </div>
         <button
           type="button"
           className={`btn btn-small ${sunMode === 'sunset' ? 'on' : ''}`}
           title="Set the time box to local sunset for this date and location"
-          onClick={() => void applySunTime('sunset')}
+          onClick={() => {
+            if (schedRepeat === 'daily') setDailyAt('sunset');
+            void applySunTime('sunset');
+          }}
         >
           Sunset{sunTimes ? ` ${localTimeHM(sunTimes.sunset)}` : ''}
         </button>
@@ -517,10 +626,15 @@ export default function App() {
           type="button"
           className={`btn btn-small ${sunMode === 'sunrise' ? 'on' : ''}`}
           title="Set the time box to local sunrise for this date and location"
-          onClick={() => void applySunTime('sunrise')}
+          onClick={() => {
+            if (schedRepeat === 'daily') setDailyAt('sunrise');
+            void applySunTime('sunrise');
+          }}
         >
           Sunrise{sunTimes ? ` ${localTimeHM(sunTimes.sunrise)}` : ''}
         </button>
+        </div>
+        <div className="schedule-row schedule-row-set">
         <button
           type="button"
           className="btn btn-small"
@@ -529,6 +643,48 @@ export default function App() {
         >
           Set
         </button>
+        <div className="sched-checks sched-checks-stack">
+          <label className="sched-check">
+            <input
+              type="checkbox"
+              checked={leadMode === 'on-time'}
+              onChange={() => setLeadMode('on-time')}
+            />
+            <span>On time</span>
+          </label>
+          <label className="sched-check" title="Fire this many minutes and seconds before the clock or sun time">
+            <input
+              type="checkbox"
+              checked={leadMode === 'before'}
+              onChange={() => setLeadMode('before')}
+            />
+            <span>Before</span>
+          </label>
+        </div>
+        <label className="sched-field lead-field">
+          <span>Min</span>
+          <input
+            type="number"
+            min={0}
+            max={180}
+            step={1}
+            value={leadMin}
+            disabled={leadMode !== 'before'}
+            onChange={(e) => setLeadMin(Math.max(0, Number(e.target.value)))}
+          />
+        </label>
+        <label className="sched-field lead-field">
+          <span>Sec</span>
+          <input
+            type="number"
+            min={0}
+            max={59}
+            step={1}
+            value={leadSec}
+            disabled={leadMode !== 'before'}
+            onChange={(e) => setLeadSec(Math.max(0, Math.min(59, Number(e.target.value))))}
+          />
+        </label>
         {armedAt && (
           <button
             type="button"
@@ -563,9 +719,24 @@ export default function App() {
         )}
         <span className="sched-status">
           {place ? place.label : 'No location'}
-          {armedAt ? ` · Go all ${formatWhen(armedAt)} · keep tab open` : ' · Set to start countdown'}
+          {armedAt
+            ? ` · ${
+                schedRepeat === 'daily'
+                  ? dailyAt === 'sunset'
+                    ? 'Daily at sunset'
+                    : dailyAt === 'sunrise'
+                      ? 'Daily at sunrise'
+                      : 'Daily at clock time'
+                  : 'Go all'
+              }${
+                leadMode === 'before'
+                  ? ` (${leadMin}m ${leadSec}s before)`
+                  : ' (on time)'
+              } ${formatWhen(armedAt)} · keep tab open`
+            : ' · Set to start countdown'}
           {geoMsg ? ` · ${geoMsg}` : ''}
         </span>
+        </div>
       </div>
 
       <div className="workspace">
@@ -616,41 +787,54 @@ export default function App() {
         <aside className="controls-pane">
           <div className="controls-scroll">
             <section className="experiments">
-              <h2>
-                Experiment seeds <Tip text={TIPS.seeds} />
-              </h2>
-              <p className="hint">Set real mixer params only — geometry emerges.</p>
-              <div className="preset-row">
-                {EXPERIMENT_PRESETS.map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    className="chip"
-                    title={p.note}
-                    onClick={() => pushChannels(p.apply(channels))}
-                  >
-                    {p.name}
-                  </button>
-                ))}
-              </div>
-              <div className="preset-row tools">
-                <span className="btn-with-tip">
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={() => pushChannels(snapToSimpleRatio(channels))}
-                  >
-                    Snap ratio
-                  </button>
-                  <Tip text={TIPS.snapRatio} />
-                </span>
-                <span className="btn-with-tip">
-                  <button type="button" className="btn" onClick={markFinding}>
-                    Mark finding
-                  </button>
-                  <Tip text={TIPS.markFinding} />
-                </span>
-              </div>
+              <details ref={seedsRef}>
+                <summary>
+                  <h2>
+                    Experiment seeds <Tip text={TIPS.seeds} />
+                  </h2>
+                </summary>
+                <p className="hint">Four live channels — set real mixer params; geometry emerges.</p>
+                <div className="preset-row">
+                  {EXPERIMENT_PRESETS.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className="chip"
+                      title={p.note}
+                      onClick={() => pushChannels(p.apply(channels))}
+                    >
+                      {p.name}
+                    </button>
+                  ))}
+                </div>
+                <div className="custom-seeds">
+                  <div className="custom-seeds-head">
+                    <h3>Custom</h3>
+                    {findings.length > 0 && (
+                      <button type="button" className="btn btn-small" onClick={clearFindings}>
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  {findings.length === 0 ? (
+                    <p className="hint">Mark finding saves the current mixer here.</p>
+                  ) : (
+                    <div className="findings-list">
+                      {findings.map((f) => (
+                        <button
+                          key={f.id}
+                          type="button"
+                          className="finding-chip"
+                          onClick={() => loadFinding(f)}
+                        >
+                          <strong>{f.name}</strong>
+                          <span>{f.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </details>
             </section>
 
             <section className="binaural-bar">
@@ -694,6 +878,24 @@ export default function App() {
               <p className="hint">
                 Δ ≈ {beatHz.toFixed(2)} Hz from first two active channels when set.
               </p>
+              <div className="preset-row tools">
+                <span className="btn-with-tip">
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => pushChannels(snapToSimpleRatio(channels))}
+                  >
+                    Snap ratio
+                  </button>
+                  <Tip text={TIPS.snapRatio} />
+                </span>
+                <span className="btn-with-tip">
+                  <button type="button" className="btn" onClick={markFinding}>
+                    Mark finding
+                  </button>
+                  <Tip text={TIPS.markFinding} />
+                </span>
+              </div>
             </section>
 
             <section className="mixer">
@@ -747,30 +949,6 @@ export default function App() {
                 ))}
               </div>
             </section>
-
-            {findings.length > 0 && (
-              <section className="findings">
-                <div className="mixer-head">
-                  <h2>Findings</h2>
-                  <button type="button" className="btn" onClick={clearFindings}>
-                    Clear
-                  </button>
-                </div>
-                <div className="findings-list">
-                  {findings.map((f) => (
-                    <button
-                      key={f.id}
-                      type="button"
-                      className="finding-chip"
-                      onClick={() => loadFinding(f)}
-                    >
-                      <strong>{f.name}</strong>
-                      <span>{f.label}</span>
-                    </button>
-                  ))}
-                </div>
-              </section>
-            )}
 
             {error && <div className="error">{error}</div>}
           </div>
@@ -1283,7 +1461,7 @@ const TIPS = {
   partials:
     'How many sine components are in the mix: each channel’s fundamental (H1) plus any overtones H2, H3, … that have gain.',
   seeds:
-    'Presets that only set real mixer values (freqs, pan, phase, harmonics). The drawing is never pre-chosen — it emerges from those values.',
+    'Presets that set all four channels (freqs, pan, phase, harmonics). Extra channels stay muted. Geometry is never pre-drawn — it emerges from those values.',
   snapRatio:
     'Keeps the first active channel’s frequency and moves the second so f₂/f₁ becomes a simple ratio (1:1, 3:2, 4:3…). Locks a cleaner figure when you were slightly detuned.',
   markFinding:

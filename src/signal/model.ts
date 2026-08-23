@@ -273,125 +273,150 @@ function base(
   };
 }
 
+const PAN4 = [-1, 1, -0.4, 0.4] as const;
+
+function voice4(
+  ch: ChannelState[],
+  specs: {
+    frequency: number;
+    pan?: number;
+    phaseDeg: number;
+    gain?: number;
+    harmonics?: ChannelState['harmonics'];
+  }[],
+): ChannelState[] {
+  return ch.map((c, i) => {
+    if (i >= 4 || !specs[i]) return mute(c);
+    const s = specs[i];
+    return base(c, { ...s, pan: s.pan ?? PAN4[i] ?? 0 });
+  });
+}
+
 export const EXPERIMENT_PRESETS: ExperimentPreset[] = [
   {
     id: 'circle-quad',
     name: 'Circle region (1:1 · 90°)',
-    note: 'Often ellipse/circle on vector scope — not forced sacred art.',
+    note: 'Four-phase 1:1 pair — ellipse/circle region on the scope, not forced art.',
     apply: (ch) =>
-      mapActive(ch, (c, i) => {
-        if (i === 0) return base(c, { frequency: 200, gain: 0.75, pan: -1, phaseDeg: 0 });
-        if (i === 1) return base(c, { frequency: 200, gain: 0.75, pan: 1, phaseDeg: 90 });
-        return mute(c);
-      }),
+      voice4(ch, [
+        { frequency: 200, gain: 0.75, phaseDeg: 0 },
+        { frequency: 200, gain: 0.75, phaseDeg: 90 },
+        { frequency: 200, gain: 0.55, phaseDeg: 180 },
+        { frequency: 200, gain: 0.55, phaseDeg: 270 },
+      ]),
   },
   {
     id: 'line-phase0',
     name: 'Line region (1:1 · 0°)',
-    note: 'Same freqs, 0° phase → collapses toward a line.',
+    note: 'Same freq, 0° on all four pans — collapses toward a line.',
     apply: (ch) =>
-      mapActive(ch, (c, i) => {
-        if (i === 0) return base(c, { frequency: 200, gain: 0.75, pan: -1, phaseDeg: 0 });
-        if (i === 1) return base(c, { frequency: 200, gain: 0.75, pan: 1, phaseDeg: 0 });
-        return mute(c);
-      }),
+      voice4(ch, [
+        { frequency: 200, gain: 0.7, pan: -1, phaseDeg: 0 },
+        { frequency: 200, gain: 0.7, pan: 1, phaseDeg: 0 },
+        { frequency: 200, gain: 0.5, pan: -0.35, phaseDeg: 0 },
+        { frequency: 200, gain: 0.5, pan: 0.35, phaseDeg: 0 },
+      ]),
   },
   {
     id: 'ratio-3-2',
     name: 'Ratio 3:2 mesh',
-    note: 'Perfect fifth relation — locked Lissajous mesh.',
+    note: 'Fifth + octave stack across four channels — locked Lissajous mesh.',
     apply: (ch) =>
-      mapActive(ch, (c, i) => {
-        if (i === 0) return base(c, { frequency: 220, gain: 0.7, pan: -1, phaseDeg: 0 });
-        if (i === 1) return base(c, { frequency: 330, gain: 0.7, pan: 1, phaseDeg: 15 });
-        return mute(c);
-      }),
+      voice4(ch, [
+        { frequency: 220, gain: 0.7, phaseDeg: 0 },
+        { frequency: 330, gain: 0.7, phaseDeg: 15 },
+        { frequency: 440, gain: 0.5, phaseDeg: 30 },
+        { frequency: 495, gain: 0.5, phaseDeg: 45 },
+      ]),
   },
   {
     id: 'ratio-4-3',
     name: 'Ratio 4:3 mesh',
-    note: 'Fourth relation — different knot count.',
+    note: 'Fourth relation plus related stack — different knot count.',
     apply: (ch) =>
-      mapActive(ch, (c, i) => {
-        if (i === 0) return base(c, { frequency: 240, gain: 0.7, pan: -1, phaseDeg: 0 });
-        if (i === 1) return base(c, { frequency: 320, gain: 0.7, pan: 1, phaseDeg: 20 });
-        return mute(c);
-      }),
+      voice4(ch, [
+        { frequency: 240, gain: 0.7, phaseDeg: 0 },
+        { frequency: 320, gain: 0.7, phaseDeg: 20 },
+        { frequency: 360, gain: 0.5, phaseDeg: 10 },
+        { frequency: 480, gain: 0.5, phaseDeg: 30 },
+      ]),
   },
   {
     id: 'binaural-10',
     name: 'Binaural Δ10 Hz',
-    note: 'Near-unison detune — drifting figure + Hemi-style beat.',
+    note: 'Two hard-panned 10 Hz pairs (outer + inner) — drifting figure + Hemi-style beat.',
     apply: (ch) =>
-      mapActive(ch, (c, i) => {
-        if (i === 0) return base(c, { frequency: 200, gain: 0.7, pan: -1, phaseDeg: 0 });
-        if (i === 1) return base(c, { frequency: 210, gain: 0.7, pan: 1, phaseDeg: 0 });
-        return mute(c);
-      }),
+      voice4(ch, [
+        { frequency: 200, gain: 0.7, pan: -1, phaseDeg: 0 },
+        { frequency: 210, gain: 0.7, pan: 1, phaseDeg: 0 },
+        { frequency: 200, gain: 0.5, pan: -0.4, phaseDeg: 0 },
+        { frequency: 210, gain: 0.5, pan: 0.4, phaseDeg: 0 },
+      ]),
   },
   {
     id: 'with-h2',
-    name: '1:1 + H2 on Ch1',
-    note: 'H2 = 2·f0. Path gains folds from the overtone.',
+    name: '1:1 + H2',
+    note: 'H2 = 2·f0 on the outer pair; inner pair keeps the 90° quadrature.',
     apply: (ch) =>
-      mapActive(ch, (c, i) => {
-        if (i === 0)
-          return base(c, {
-            frequency: 200,
-            gain: 0.7,
-            pan: -1,
-            phaseDeg: 0,
-            harmonics: [{ order: 2, gain: 0.45 }],
-          });
-        if (i === 1) return base(c, { frequency: 200, gain: 0.7, pan: 1, phaseDeg: 90 });
-        return mute(c);
-      }),
+      voice4(ch, [
+        {
+          frequency: 200,
+          gain: 0.7,
+          phaseDeg: 0,
+          harmonics: [{ order: 2, gain: 0.45 }],
+        },
+        { frequency: 200, gain: 0.7, phaseDeg: 90 },
+        {
+          frequency: 200,
+          gain: 0.5,
+          phaseDeg: 180,
+          harmonics: [{ order: 2, gain: 0.35 }],
+        },
+        { frequency: 200, gain: 0.5, phaseDeg: 270 },
+      ]),
   },
   {
     id: 'with-h2-h3-h4',
-    name: 'Stack H2–H4 on Ch1',
-    note: 'Several integer multiples of f0 — denser harmonic path.',
+    name: 'Stack H2–H4',
+    note: 'Integer multiples of f0 on two carriers — denser harmonic path.',
     apply: (ch) =>
-      mapActive(ch, (c, i) => {
-        if (i === 0)
-          return base(c, {
-            frequency: 120,
-            gain: 0.65,
-            pan: -0.6,
-            phaseDeg: 0,
-            harmonics: [
-              { order: 2, gain: 0.5 },
-              { order: 3, gain: 0.35 },
-              { order: 4, gain: 0.25 },
-            ],
-          });
-        if (i === 1) return base(c, { frequency: 120, gain: 0.55, pan: 0.6, phaseDeg: 90 });
-        return mute(c);
-      }),
+      voice4(ch, [
+        {
+          frequency: 120,
+          gain: 0.65,
+          phaseDeg: 0,
+          harmonics: [
+            { order: 2, gain: 0.5 },
+            { order: 3, gain: 0.35 },
+            { order: 4, gain: 0.25 },
+          ],
+        },
+        { frequency: 120, gain: 0.55, phaseDeg: 90 },
+        {
+          frequency: 180,
+          gain: 0.5,
+          phaseDeg: 20,
+          harmonics: [{ order: 2, gain: 0.4 }],
+        },
+        { frequency: 180, gain: 0.5, phaseDeg: 110 },
+      ]),
   },
   {
-    id: 'tri-partial',
-    name: 'Three fundamentals (complex)',
-    note: 'Often not “sacred-looking” — useful contrast.',
+    id: 'four-partial',
+    name: 'Four fundamentals',
+    note: 'Four independent carriers — often not “sacred-looking”; useful contrast.',
     apply: (ch) =>
-      mapActive(ch, (c, i) => {
-        if (i === 0) return base(c, { frequency: 180, gain: 0.55, pan: -0.8, phaseDeg: 0 });
-        if (i === 1) return base(c, { frequency: 240, gain: 0.55, pan: 0.8, phaseDeg: 40 });
-        if (i === 2) return base(c, { frequency: 310, gain: 0.45, pan: 0, phaseDeg: 10 });
-        return mute(c);
-      }),
+      voice4(ch, [
+        { frequency: 180, gain: 0.55, phaseDeg: 0 },
+        { frequency: 240, gain: 0.55, phaseDeg: 40 },
+        { frequency: 310, gain: 0.5, phaseDeg: 10 },
+        { frequency: 400, gain: 0.5, phaseDeg: 70 },
+      ]),
   },
 ];
 
 function mute(c: ChannelState): ChannelState {
   return { ...c, muted: true };
-}
-
-function mapActive(
-  ch: ChannelState[],
-  fn: (c: ChannelState, index: number) => ChannelState,
-): ChannelState[] {
-  return ch.map((c, i) => fn(c, i));
 }
 
 export function snapToSimpleRatio(channels: ChannelState[]): ChannelState[] {

@@ -196,8 +196,11 @@ export function nextScheduledFire(opts: {
   sun: SunMode;
   place: GeoPlace | null;
   now?: Date;
+  /** Fire this many ms before the event (sunset/clock). */
+  leadMs?: number;
 }): Date | null {
   const now = opts.now ?? new Date();
+  const lead = Math.max(0, opts.leadMs ?? 0);
   const sunKind = opts.sun === 'manual' ? null : opts.sun;
 
   const eventOnDay = (day: Date): Date | null => {
@@ -208,15 +211,19 @@ export function nextScheduledFire(opts: {
     return combineLocal(localDateISO(day), opts.timeHM);
   };
 
+  const fireAt = (event: Date | null): Date | null => {
+    if (!event) return null;
+    return new Date(event.getTime() - lead);
+  };
+
   if (opts.repeat === 'once') {
-    const at = eventOnDay(parseLocalDate(opts.dateISO));
+    const at = fireAt(eventOnDay(parseLocalDate(opts.dateISO)));
     if (!at || at.getTime() <= now.getTime() + 400) return null;
     return at;
   }
 
-  for (let i = 0; i < 3; i++) {
-    const day = addDays(now, i);
-    const at = eventOnDay(day);
+  for (let i = 0; i < 4; i++) {
+    const at = fireAt(eventOnDay(addDays(now, i)));
     if (at && at.getTime() > now.getTime() + 400) return at;
   }
   return null;

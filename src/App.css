@@ -92,26 +92,50 @@
 .schedule-bar {
   flex-shrink: 0;
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 0.4rem 0.5rem;
+  flex-direction: column;
+  gap: 0.35rem;
   padding: 0.4rem 1rem 0.5rem;
   border-bottom: 1px solid #2a2438;
   background: #0c0a14;
 }
 
+.schedule-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.45rem 0.7rem;
+}
+
+.schedule-row-set {
+  padding-top: 0.15rem;
+  border-top: 1px solid #2a2438;
+}
+
 .sched-field {
   display: flex;
   flex-direction: column;
-  gap: 0.1rem;
+  justify-content: flex-end;
+  gap: 0.18rem;
   font-size: 0.58rem;
   color: #7a7390;
+}
+
+.sched-field > span {
+  display: block;
+  height: 0.9rem;
+  line-height: 0.9rem;
+}
+
+.sched-field-spacer {
+  visibility: hidden;
 }
 
 .sched-field input,
 .sched-select {
   min-width: 8.5rem;
-  padding: 0.22rem 0.35rem;
+  height: 1.75rem;
+  box-sizing: border-box;
+  padding: 0 0.35rem;
   border-radius: 0.3rem;
   border: 1px solid #3d3550;
   background: #100e18;
@@ -120,8 +144,91 @@
 }
 
 .sched-select {
+  min-width: 11rem;
+}
+
+.sched-check-cluster {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
   align-self: flex-end;
-  height: 1.7rem;
+  padding-bottom: 0.1rem;
+}
+
+.sched-checks {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.sched-checks-stack {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0.05rem;
+}
+
+.sched-checks-stack .sched-check {
+  height: 1rem;
+}
+
+.sched-check {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.28rem;
+  height: 1.75rem;
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  color: #c4b5fd;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.sched-check input[type='checkbox'] {
+  width: 0.85rem;
+  height: 0.85rem;
+  margin: 0;
+  padding: 0;
+  flex-shrink: 0;
+  accent-color: #a78bfa;
+  cursor: pointer;
+}
+
+.sched-check span {
+  display: block;
+  line-height: 1;
+  height: auto;
+}
+
+.sched-check:has(input:disabled) {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.sched-check input:disabled {
+  cursor: not-allowed;
+}
+
+.schedule-bar .btn-small {
+  height: 1.75rem;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+}
+
+.lead-field input {
+  min-width: 3.4rem;
+  width: 3.4rem;
+}
+
+.lead-field input:disabled {
+  opacity: 0.4;
 }
 
 .sched-countdown {
@@ -130,16 +237,20 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.04em;
   color: #f0d78c;
-  align-self: center;
+  height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
   min-width: 5.5rem;
 }
 
 .sched-status {
   font-size: 0.62rem;
   color: #7a7390;
-  align-self: center;
   max-width: 28rem;
   line-height: 1.3;
+  height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
 }
 
 .btn.btn-small.on {
@@ -312,6 +423,41 @@
   color: #c4b5fd;
 }
 
+.experiments details {
+  margin: 0;
+}
+
+.experiments summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.experiments summary::-webkit-details-marker {
+  display: none;
+}
+
+.experiments summary::before {
+  content: '▸';
+  color: #a78bfa;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+
+.experiments details[open] summary::before {
+  content: '▾';
+}
+
+.experiments summary h2 {
+  margin: 0;
+}
+
+.experiments details[open] summary {
+  margin-bottom: 0.4rem;
+}
+
 .hint {
   margin: 0 0 0.45rem;
   font-size: 0.68rem;
@@ -363,6 +509,27 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.35rem;
+}
+
+.custom-seeds {
+  margin-top: 0.45rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid #2a2438;
+}
+
+.custom-seeds-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  margin-bottom: 0.3rem;
+}
+
+.custom-seeds h3 {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #c4b5fd;
 }
 
 .binaural-row {
