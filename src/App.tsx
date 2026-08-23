@@ -86,6 +86,9 @@ function migrateChannels(channels: ChannelState[]): ChannelState[] {
 
 export default function App() {
   const [channels, setChannels] = useState<ChannelState[]>(defaultChannels);
+  const [selectedChannelId, setSelectedChannelId] = useState(
+    () => defaultChannels()[0]?.id ?? 1,
+  );
   const [master, setMaster] = useState(0.5);
   const [playing, setPlaying] = useState(false);
   const [carrier, setCarrier] = useState(200);
@@ -203,13 +206,25 @@ export default function App() {
 
   const onAddChannel = () => {
     if (channels.length >= MAX_CHANNELS) return;
-    pushChannels(addChannel(channels));
+    const next = addChannel(channels);
+    pushChannels(next);
+    const added = next[next.length - 1];
+    if (added) setSelectedChannelId(added.id);
   };
 
   const onRemoveChannel = (id: number) => {
     if (channels.length <= MIN_CHANNELS) return;
-    pushChannels(removeChannel(channels, id));
+    const next = removeChannel(channels, id);
+    pushChannels(next);
+    if (id === selectedChannelId) {
+      const i = channels.findIndex((c) => c.id === id);
+      const neighbor = next[Math.max(0, i - 1)] ?? next[0];
+      if (neighbor) setSelectedChannelId(neighbor.id);
+    }
   };
+
+  const selectedChannel =
+    channels.find((c) => c.id === selectedChannelId) ?? channels[0] ?? null;
 
   const masterRef = useRef(master);
   masterRef.current = master;
@@ -933,21 +948,34 @@ export default function App() {
                   </label>
                 </div>
               </div>
-              <div className="channel-list">
+              <div className="channel-tabs" role="tablist" aria-label="Channels">
                 {channels.map((ch) => (
-                  <ChannelStrip
+                  <button
                     key={ch.id}
-                    ch={ch}
-                    onChange={updateChannel}
-                    onGoGlide={() => {
-                      engine.unlock();
-                      void onGoChannelGlide(ch.id);
-                    }}
-                    onRemove={() => onRemoveChannel(ch.id)}
-                    canRemove={channels.length > MIN_CHANNELS}
-                  />
+                    type="button"
+                    role="tab"
+                    aria-selected={selectedChannel?.id === ch.id}
+                    className={`channel-tab${selectedChannel?.id === ch.id ? ' on' : ''}${ch.muted ? ' muted' : ''}`}
+                    onClick={() => setSelectedChannelId(ch.id)}
+                  >
+                    {ch.label}
+                    {ch.glide.running && <span className="tab-live">glide</span>}
+                  </button>
                 ))}
               </div>
+              {selectedChannel && (
+                <ChannelStrip
+                  key={selectedChannel.id}
+                  ch={selectedChannel}
+                  onChange={updateChannel}
+                  onGoGlide={() => {
+                    engine.unlock();
+                    void onGoChannelGlide(selectedChannel.id);
+                  }}
+                  onRemove={() => onRemoveChannel(selectedChannel.id)}
+                  canRemove={channels.length > MIN_CHANNELS}
+                />
+              )}
             </section>
 
             {error && <div className="error">{error}</div>}

@@ -691,7 +691,7 @@ export function relabelChannels(channels: ChannelState[]): ChannelState[] {
 }
 
 export function defaultChannels(): ChannelState[] {
-  nextChannelId = 5;
+  nextChannelId = 3;
   return [
     createChannel({
       id: 1,
@@ -709,25 +709,7 @@ export function defaultChannels(): ChannelState[] {
       gain: 0.75,
       pan: 1,
       phaseDeg: 90,
-      muted: false,
-    }),
-    createChannel({
-      id: 3,
-      label: 'Ch 3',
-      frequency: 300,
-      gain: 0.5,
-      pan: -0.35,
-      phaseDeg: 30,
-      muted: false,
-    }),
-    createChannel({
-      id: 4,
-      label: 'Ch 4',
-      frequency: 400,
-      gain: 0.5,
-      pan: 0.35,
-      phaseDeg: 60,
-      muted: false,
+      muted: true,
     }),
   ];
 }
@@ -744,7 +726,7 @@ export function addChannel(channels: ChannelState[]): ChannelState[] {
       gain: 0.45,
       pan: Math.max(-1, Math.min(1, pan)),
       phaseDeg: (i * 30) % 360,
-      muted: false,
+      muted: true,
       harmonics: [],
     }),
   ]);

@@ -623,15 +623,59 @@
   accent-color: #a78bfa;
 }
 
-.channel-list {
+.channel-tabs {
   display: flex;
-  flex-direction: column;
-  gap: 0.55rem;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+  margin: 0.15rem 0 0;
+  padding: 0 0.15rem;
+  border-bottom: 1px solid #2a2438;
+}
+
+.channel-tab {
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 0.4rem 0.4rem 0 0;
+  background: transparent;
+  color: #9b93b0;
+  padding: 0.38rem 0.7rem 0.42rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.channel-tab:hover {
+  color: #e8e4f0;
+  background: #1a1528;
+}
+
+.channel-tab.on {
+  background: #0c0a14;
+  color: #e8e4f0;
+  border-color: #2a2438;
+  margin-bottom: -1px;
+  padding-bottom: 0.48rem;
+}
+
+.channel-tab.muted {
+  opacity: 0.5;
+}
+
+.tab-live {
+  font-size: 0.55rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #6ee7b7;
 }
 
 .channel-card {
-  border-radius: 0.5rem;
+  border-radius: 0 0.5rem 0.5rem 0.5rem;
   border: 1px solid #2a2438;
+  border-top: none;
   background: #0c0a14;
   padding: 0.55rem 0.55rem;
 }
