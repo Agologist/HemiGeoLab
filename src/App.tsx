@@ -882,13 +882,16 @@ export default function App() {
                     onChange={(e) => setBeat(Number(e.target.value))}
                   />
                 </label>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => pushChannels(applyBinauralPair(channels, carrier, beat))}
-                >
-                  Apply L/R
-                </button>
+                <span className="btn-with-tip">
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => pushChannels(applyBinauralPair(channels, carrier, beat))}
+                  >
+                    Apply L/R
+                  </button>
+                  <Tip text={TIPS.applyLR} />
+                </span>
               </div>
               <p className="hint">
                 Δ ≈ {beatHz.toFixed(2)} Hz from first two active channels when set.
@@ -1575,6 +1578,8 @@ const TIPS = {
     'Saves the current full mixer state in this browser so you can reload interesting experiments later.',
   binaural:
     'Sets two channels to a carrier and carrier+beat, hard-panned left/right. Good for Hemi-style pairs; the scope shows the L/R relationship.',
+  applyLR:
+    'Writes Carrier to channel 1 (hard left) and Carrier+Beat to channel 2 (hard right), both unmuted as sines with no extra harmonics. Any further channels are muted. Headphones: left ear = carrier, right ear = carrier + beat.',
   carrier:
     'Base audible tone for the left channel of a binaural pair (Hz). The beat is added on the right channel.',
   beatHz:
