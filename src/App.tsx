@@ -6,6 +6,7 @@ import {
   MIN_CHANNELS,
   addChannel,
   addHarmonic,
+  anyChannelAudible,
   applyBinauralPair,
   brainwaveBand,
   defaultChannels,
@@ -23,6 +24,7 @@ import {
   stopGlide,
   tickGlides,
   type ChannelState,
+  type GlideRepeat,
   type WaveType,
 } from './audio/engine';
 import { GeometryCanvas } from './components/GeometryCanvas';
@@ -96,15 +98,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<SignalAnalysis>(() => analyzeSignal(defaultChannels()));
   const [findings, setFindings] = useState<Finding[]>(loadFindings);
-  /** True after Unison Go all until the course ends (no hold) or Stop all. */
+  /** True after Unison Go all until those glides finish or Stop all. */
   const unisonSessionRef = useRef(false);
   const [unisonActive, setUnisonActive] = useState(false);
-  const [hold, setHold] = useState(false);
-  const [holdSec, setHoldSec] = useState(8);
-  const holdRef = useRef(false);
-  const holdSecRef = useRef(8);
-  holdRef.current = hold;
-  holdSecRef.current = holdSec;
 
   const [schedDate, setSchedDate] = useState(() => localDateISO());
   const [schedTime, setSchedTime] = useState(() => localTimeHM(new Date()));
@@ -138,11 +134,23 @@ export default function App() {
     () => channels.filter((c) => c.glide?.running).length,
     [channels],
   );
+  const syncEngine = useCallback((next: ChannelState[]) => {
+    if (!engine.isPlaying()) return;
+    if (anyChannelAudible(next)) {
+      engine.updateAll(next);
+      return;
+    }
+    unisonSessionRef.current = false;
+    setUnisonActive(false);
+    engine.stop();
+    setPlaying(false);
+  }, []);
+
   const pushChannels = useCallback((next: ChannelState[]) => {
     setChannels(next);
     setAnalysis(analyzeSignal(next));
-    if (engine.isPlaying()) engine.updateAll(next);
-  }, []);
+    syncEngine(next);
+  }, [syncEngine]);
 
   const updateChannel = useCallback((id: number, patch: Partial<ChannelState>) => {
     setChannels((prev) => {
@@ -153,8 +161,9 @@ export default function App() {
         if (nextPatch.pan != null && c.glide?.linkPan) {
           delete nextPatch.pan;
         }
-        // Manual f0 edit still stops a running glide; pan does not
-        if (nextPatch.frequency != null && c.glide?.running) {
+        // Manual f0 edit still stops a running glide; pan does not.
+        // Full glide patches (Go / Stop / tick) carry their own glide object.
+        if (nextPatch.frequency != null && c.glide?.running && nextPatch.glide == null) {
           return {
             ...c,
             ...nextPatch,
@@ -164,10 +173,10 @@ export default function App() {
         return { ...c, ...nextPatch };
       });
       setAnalysis(analyzeSignal(next));
-      if (engine.isPlaying()) engine.updateAll(next);
+      syncEngine(next);
       return next;
     });
-  }, []);
+  }, [syncEngine]);
 
   const stopOutput = useCallback(() => {
     unisonSessionRef.current = false;
@@ -183,26 +192,21 @@ export default function App() {
       raf = requestAnimationFrame(loop);
       setChannels((prev) => {
         if (!prev.some((c) => c.glide?.running)) return prev;
-        const next = tickGlides(prev, now, {
-          enabled: holdRef.current,
-          seconds: holdSecRef.current,
-        });
+        const next = tickGlides(prev, now);
         if (!next) return prev;
         setAnalysis(analyzeSignal(next));
-        if (engine.isPlaying()) engine.updateAll(next);
+        syncEngine(next);
         const stillRunning = next.some((c) => c.glide?.running);
         if (!stillRunning && unisonSessionRef.current) {
           unisonSessionRef.current = false;
           setUnisonActive(false);
-          engine.stop();
-          setPlaying(false);
         }
         return next;
       });
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [syncEngine]);
 
   const onAddChannel = () => {
     if (channels.length >= MAX_CHANNELS) return;
@@ -270,7 +274,9 @@ export default function App() {
     const next = stopAllGlides(channelsRef.current);
     setChannels(next);
     setAnalysis(analyzeSignal(next));
-    stopOutput();
+    unisonSessionRef.current = false;
+    setUnisonActive(false);
+    syncEngine(next);
   };
 
   const sessionBusy = glideRunning > 0 || unisonActive;
@@ -487,7 +493,7 @@ export default function App() {
               <button
                 type="button"
                 className="btn stop"
-                title="Stop glides and audio"
+                title="Stop glide channels only — other playing channels keep going"
                 onClick={onStopAllGlides}
               >
                 Stop all
@@ -508,30 +514,9 @@ export default function App() {
                 Go all
               </button>
             )}
-            <label className="hold-toggle" title={TIPS.hold}>
-              <input
-                type="checkbox"
-                checked={hold}
-                onChange={(e) => setHold(e.target.checked)}
-              />
-              Hold
-            </label>
-            <label className="hold-sec" title="Seconds to stay at dest, and at home if ping-pong is on">
-              <input
-                type="number"
-                min={0}
-                max={3600}
-                step={0.5}
-                value={holdSec}
-                disabled={!hold}
-                onChange={(e) => setHoldSec(Math.max(0, Number(e.target.value)))}
-              />
-              s
-            </label>
             <span className="unison-glide-count">
               {glideReady} ready
               {glideRunning > 0 ? ` · ${glideRunning} running` : ''}
-              {hold && unisonActive && glideRunning === 0 ? ' · holding' : ''}
             </span>
           </div>
         </div>
@@ -549,6 +534,12 @@ export default function App() {
           <input
             type="date"
             value={schedDate}
+            disabled={schedRepeat === 'daily'}
+            title={
+              schedRepeat === 'daily'
+                ? 'Daily — the calendar is unused; it fires every day'
+                : undefined
+            }
             onChange={(e) => setSchedDate(e.target.value)}
           />
         </label>
@@ -558,6 +549,15 @@ export default function App() {
             type="time"
             step="1"
             value={schedTime.length === 5 ? `${schedTime}:00` : schedTime}
+            disabled={
+              schedRepeat === 'daily' &&
+              (dailyAt === 'sunrise' || dailyAt === 'sunset')
+            }
+            title={
+              schedRepeat === 'daily' && (dailyAt === 'sunrise' || dailyAt === 'sunset')
+                ? 'Daily sunrise/sunset — time comes from this location'
+                : undefined
+            }
             onChange={(e) => {
               setSchedTime(e.target.value);
               if (schedRepeat !== 'daily' || dailyAt === 'time') {
@@ -1184,6 +1184,48 @@ function ChannelStrip({
             </label>
             <label className="field">
               <span className="field-label">
+                Home hold (s) <Tip text={TIPS.glideHomeHold} />
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={3600}
+                step={0.1}
+                value={ch.glide.homeHoldSec ?? 0}
+                disabled={ch.glide.running}
+                onChange={(e) =>
+                  onChange(ch.id, {
+                    glide: {
+                      ...ch.glide,
+                      homeHoldSec: Math.max(0, Number(e.target.value)),
+                    },
+                  })
+                }
+              />
+            </label>
+            <label className="field">
+              <span className="field-label">
+                Dest hold (s) <Tip text={TIPS.glideDestHold} />
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={3600}
+                step={0.1}
+                value={ch.glide.destHoldSec ?? 0}
+                disabled={ch.glide.running}
+                onChange={(e) =>
+                  onChange(ch.id, {
+                    glide: {
+                      ...ch.glide,
+                      destHoldSec: Math.max(0, Number(e.target.value)),
+                    },
+                  })
+                }
+              />
+            </label>
+            <label className="field">
+              <span className="field-label">
                 Up time (s) <Tip text={TIPS.glideTimeUp} />
               </span>
               <input
@@ -1213,7 +1255,7 @@ function ChannelStrip({
                 max={600}
                 step={0.1}
                 value={ch.glide.durationDownSec}
-                disabled={ch.glide.running || !ch.glide.pingPong}
+                disabled={ch.glide.running || (ch.glide.repeat ?? 'once') === 'once'}
                 onChange={(e) =>
                   onChange(ch.id, {
                     glide: {
@@ -1224,6 +1266,52 @@ function ChannelStrip({
                 }
               />
             </label>
+            <label className="field">
+              <span className="field-label">
+                Repeat <Tip text={TIPS.glideRepeat} />
+              </span>
+              <select
+                value={ch.glide.repeat ?? 'once'}
+                disabled={ch.glide.running}
+                onChange={(e) =>
+                  onChange(ch.id, {
+                    glide: {
+                      ...ch.glide,
+                      repeat: e.target.value as GlideRepeat,
+                    },
+                  })
+                }
+              >
+                <option value="once">Once</option>
+                <option value="cycle">Cycle</option>
+                <option value="pingpong">Ping-pong</option>
+              </select>
+            </label>
+            {(ch.glide.repeat ?? 'once') === 'cycle' ? (
+              <label className="field">
+                <span className="field-label">
+                  Cycles <Tip text={TIPS.glideCycles} />
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  max={999}
+                  step={1}
+                  value={ch.glide.cycleCount ?? 1}
+                  disabled={ch.glide.running}
+                  onChange={(e) =>
+                    onChange(ch.id, {
+                      glide: {
+                        ...ch.glide,
+                        cycleCount: Math.max(1, Math.round(Number(e.target.value)) || 1),
+                      },
+                    })
+                  }
+                />
+              </label>
+            ) : (
+              <div />
+            )}
             <label className="field">
               <span className="field-label">
                 Curve <Tip text={TIPS.glideCurve} />
@@ -1243,19 +1331,6 @@ function ChannelStrip({
                 <option value="log">Log (pitch)</option>
                 <option value="linear">Linear (Hz)</option>
               </select>
-            </label>
-            <label className="mute glide-pingpong">
-              <input
-                type="checkbox"
-                checked={ch.glide.pingPong}
-                disabled={ch.glide.running}
-                onChange={(e) =>
-                  onChange(ch.id, {
-                    glide: { ...ch.glide, pingPong: e.target.checked },
-                  })
-                }
-              />
-              Ping-pong <Tip text={TIPS.glidePingPong} />
             </label>
             <label className="mute glide-pingpong">
               <input
@@ -1374,13 +1449,17 @@ function ChannelStrip({
             {ch.glide.running && (
               <p className="glide-status">
                 {ch.glide.leg === 'hold' ? (
-                  <>Hold {ch.glide.holdNext === 'up' ? 'home' : 'dest'}</>
+                  <>Hold {ch.glide.holdAt === 'dest' ? 'dest' : 'home'}</>
                 ) : ch.glide.leg === 'up' ? (
                   <>↑ Home → Dest ({ch.glide.durationUpSec}s)</>
                 ) : (
                   <>↓ Dest → Home ({ch.glide.durationDownSec}s)</>
                 )}
-                {ch.glide.pingPong ? ' · ping-pong' : ''}
+                {ch.glide.repeat === 'pingpong'
+                  ? ' · ping-pong'
+                  : ch.glide.repeat === 'cycle'
+                    ? ` · cycle ${Math.min(ch.glide.cyclesCompleted + 1, ch.glide.cycleCount)}/${ch.glide.cycleCount}`
+                    : ' · once'}
                 {ch.glide.linkPan ? ' · pan linked' : ''} · {ch.frequency.toFixed(2)} Hz · pan{' '}
                 {ch.pan.toFixed(2)} · Hn = n×f0
               </p>
@@ -1513,21 +1592,26 @@ const TIPS = {
   harmonics:
     'Overtones at integer multiples of f0 (H2 = 2×f0, H3 = 3×f0, …). Each shows its Hz and level. They fold the path denser while staying locked to the fundamental.',
   glide:
-    'Optional: ramp f0 from Home to Destination. Off by default. With ping-pong, it loops back using Down time. Harmonics stay n×f0; geometry follows live f0. Use Go on a channel, or Unison glide at the top to start every enabled channel together.',
-  hold: 'After a glide reaches dest (or home, on ping-pong), stay on that frequency for the seconds in the box, then continue. Ping-pong keeps looping until Stop all.',
-  glideHome: 'Starting frequency (Hz) when you press Go. f0 jumps here, then ramps toward Destination (up leg).',
-  glideDest: 'Far frequency (Hz). One-shot ends here; ping-pong turns around and returns to Home.',
+    'Optional: ramp f0 from Home to Destination. Off by default. Home/dest holds, Repeat (Once / Cycle / Ping-pong), and Down time are per channel. Harmonics stay n×f0. Use Go on a channel, or Go all to start every enabled channel together — a non-glide channel already playing is left alone.',
+  glideHome: 'Starting frequency (Hz) when you press Go. f0 jumps here, sits for Home hold, then ramps toward Destination.',
+  glideDest: 'Far frequency (Hz). Once ends here after Dest hold; Cycle and Ping-pong turn around and return to Home.',
+  glideHomeHold:
+    'Seconds to play Home before the up ramp. Also used after each return to Home. 0 = leave immediately. After the last Home hold on Cycle, this channel stops.',
+  glideDestHold:
+    'Seconds to play Destination after arriving. Once: then this channel stops. Cycle / Ping-pong: then the down ramp.',
   glideTimeUp: 'Duration of the Home → Destination leg (seconds).',
   glideTimeDown:
-    'Duration of the Destination → Home leg when ping-pong is on. Ignored for one-shot glides.',
-  glidePingPong:
-    'Loop: after reaching Destination, glide back to Home using Down time, then up again, until you press Stop.',
+    'Duration of the Destination → Home leg. Used by Cycle and Ping-pong; ignored for Once.',
+  glideRepeat:
+    'Once: home → dest, then this channel stops after Dest hold. Cycle: that many full round trips, then stop after the last Home hold. Ping-pong: loop until Stop all / Stop glide.',
+  glideCycles:
+    'How many home → dest → home round trips. 1 = up, dest hold, down, home hold, then this channel stops. Other channels keep playing.',
   glideCurve:
     'Log (pitch): equal octave steps — usually more natural. Linear (Hz): constant Hz per second. Applied on both legs.',
   glideLinkPan:
-    'When on, the mixer pan slider is locked and pan moves with the same progress as frequency (reverses on the down leg if ping-pong). Use Pan home / Pan dest. Off: pan is free during the glide.',
+    'When on, the mixer pan slider is locked and pan moves with the same progress as frequency (reverses on the down leg if Cycle or Ping-pong). Use Pan home / Pan dest. Off: pan is free during the glide.',
   glidePanHome: 'Pan at the start of the up leg (−1 left … +1 right).',
-  glidePanDest: 'Pan at destination. On ping-pong return, pan glides back to Pan home.',
+  glidePanDest: 'Pan at destination. On the return leg, pan glides back to Pan home.',
 } as const;
 
 /** Portal tooltip so bubbles aren't clipped by overflow:auto panels */

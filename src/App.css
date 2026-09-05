@@ -55,29 +55,6 @@
   border-left: 1px solid #2a2438;
 }
 
-.hold-sec {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2rem;
-  font-size: 0.68rem;
-  color: #9b93b0;
-}
-
-.hold-sec input {
-  width: 3.4rem;
-  padding: 0.18rem 0.28rem;
-  border-radius: 0.3rem;
-  border: 1px solid #3d3550;
-  background: #100e18;
-  color: #e8e4f0;
-  font-size: 0.75rem;
-}
-
-.hold-sec input:disabled {
-  opacity: 0.45;
-}
-
-.hold-toggle,
 .arm-toggle {
   display: inline-flex;
   align-items: center;
@@ -128,6 +105,11 @@
 
 .sched-field-spacer {
   visibility: hidden;
+}
+
+.sched-field input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .sched-field input,
