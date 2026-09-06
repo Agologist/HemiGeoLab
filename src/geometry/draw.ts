@@ -9,6 +9,7 @@ import {
 
 export interface GeoParams {
   channels: ChannelState[];
+  bedIds: ReadonlySet<number>;
   time: number;
   playing: boolean;
   width: number;
@@ -20,8 +21,8 @@ export interface GeoParams {
  * No ornamental sacred overlays — figure is the signal relation.
  */
 export function drawGeometry(ctx: CanvasRenderingContext2D, p: GeoParams): SignalAnalysis {
-  const { width: w, height: h, time, playing, channels } = p;
-  const analysis = analyzeSignal(channels);
+  const { width: w, height: h, time, playing, channels, bedIds } = p;
+  const analysis = analyzeSignal(channels, bedIds);
 
   ctx.clearRect(0, 0, w, h);
   const grd = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.min(w, h) * 0.55);
@@ -40,7 +41,7 @@ export function drawGeometry(ctx: CanvasRenderingContext2D, p: GeoParams): Signa
   ctx.lineTo(w, h / 2);
   ctx.stroke();
 
-  const partials = channelsToPartials(channels);
+  const partials = channelsToPartials(channels, bedIds);
   if (!partials.length) {
     drawCenterLabel(ctx, w, h, 'No signal');
     return analysis;

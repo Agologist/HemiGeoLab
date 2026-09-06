@@ -143,12 +143,8 @@ export function normalizeGlide(
   };
 }
 
-export function channelIsAudible(ch: ChannelState): boolean {
-  return !ch.muted && ch.gain > 0.01;
-}
-
-export function anyChannelAudible(channels: ChannelState[]): boolean {
-  return channels.some(channelIsAudible);
+export function isChannelLive(ch: ChannelState, bedIds: ReadonlySet<number>): boolean {
+  return bedIds.has(ch.id) || !!ch.glide?.running;
 }
 
 /** u in [0,1] → frequency between home and dest */
@@ -208,12 +204,32 @@ export class HemiAudioEngine {
   private master: GainNode | null = null;
   private channels = new Map<number, ChannelNodes>();
   private playing = false;
+  /** Channels started by Play (Frequency glide off at that moment). */
+  private bedIds = new Set<number>();
   private stopTimer: number | null = null;
   private targetMaster = 0.35;
   private keepAliveOsc: OscillatorNode | null = null;
 
   isPlaying() {
     return this.playing;
+  }
+
+  setBedIds(ids: Iterable<number>) {
+    this.bedIds = new Set(ids);
+  }
+
+  removeBedIds(ids: Iterable<number>) {
+    for (const id of ids) this.bedIds.delete(id);
+  }
+
+  /** True if Play owns this channel or a glide program is running on it. */
+  isVoiceLive(ch: ChannelState): boolean {
+    return isChannelLive(ch, this.bedIds);
+  }
+
+  private voiceGain(ch: ChannelState, base: number): number {
+    if (ch.muted || !this.isVoiceLive(ch)) return 0;
+    return base;
   }
 
   /** Call synchronously from a click/tap before any await — unlocks autoplay. */
@@ -227,7 +243,7 @@ export class HemiAudioEngine {
     if (this.ctx.state !== 'running') void this.ctx.resume();
   }
 
-  /** Silent oscillator so a later scheduled Go all can still start audio. */
+  /** Silent oscillator so a later scheduled Go glides can still start audio. */
   armScheduler() {
     this.unlock();
     if (!this.ctx || this.keepAliveOsc) return;
@@ -333,7 +349,7 @@ export class HemiAudioEngine {
     const head = CHANNEL_HEAD;
     const partials: PartialNodes[] = [];
 
-    const fundGain = ch.muted ? 0 : ch.gain * head;
+    const fundGain = this.voiceGain(ch, ch.gain * head);
     const fund = this.makePartial(1, ch.frequency, ch.wave, ch.phaseDeg, fundGain);
     fund.gain.connect(pan);
     partials.push(fund);
@@ -350,7 +366,7 @@ export class HemiAudioEngine {
           f,
           ch.wave,
           ch.phaseDeg * h.order,
-          ch.gain * h.gain * scale,
+          this.voiceGain(ch, ch.gain * h.gain * scale),
         );
         p.gain.connect(pan);
         partials.push(p);
@@ -424,7 +440,7 @@ export class HemiAudioEngine {
             ch.frequency,
             ch.wave,
             ch.phaseDeg,
-            ch.muted ? 0 : ch.gain * head,
+            this.voiceGain(ch, ch.gain * head),
             t,
           );
         } else {
@@ -436,7 +452,7 @@ export class HemiAudioEngine {
             ch.frequency * p.order,
             ch.wave,
             ch.phaseDeg * p.order,
-            ch.muted ? 0 : ch.gain * g * scale,
+            this.voiceGain(ch, ch.gain * g * scale),
             t,
           );
         }
@@ -536,7 +552,7 @@ function withPan(ch: ChannelState, g: GlideState, pan: number): number {
   return g.linkPan ? pan : ch.pan;
 }
 
-/** End this channel's glide program and silence it. Other channels are untouched. */
+/** End this channel's glide program. Mute, gain, and other mixer fields stay as they are. */
 export function finishGlide(
   ch: ChannelState,
   freq = ch.frequency,
@@ -545,7 +561,6 @@ export function finishGlide(
   const g = normalizeGlide(ch.glide, ch.frequency, ch.pan);
   return {
     ...ch,
-    muted: true,
     frequency: Math.max(20, freq),
     pan: g.linkPan ? clampPan(pan) : ch.pan,
     glide: {
@@ -581,12 +596,9 @@ export function startGlide(ch: ChannelState, nowMs: number = performance.now()):
     panHome: clampPan(g.panHome),
     panDest: clampPan(g.panDest),
   };
-  const gain = ch.gain < 0.02 ? 0.5 : ch.gain;
   if (running.homeHoldSec > 0) {
     return {
       ...ch,
-      muted: false,
-      gain,
       frequency: home,
       pan: pan0,
       glide: {
@@ -601,8 +613,6 @@ export function startGlide(ch: ChannelState, nowMs: number = performance.now()):
   }
   return {
     ...ch,
-    muted: false,
-    gain,
     frequency: home,
     pan: pan0,
     glide: {
@@ -616,7 +626,7 @@ export function startGlide(ch: ChannelState, nowMs: number = performance.now()):
   };
 }
 
-/** User abort: stop the ramp and silence this channel. */
+/** User abort: stop the ramp. Mute and gain are unchanged. */
 export function stopGlide(ch: ChannelState): ChannelState {
   return finishGlide(ch);
 }
@@ -629,7 +639,7 @@ export function startEnabledGlides(
   return channels.map((ch) => (ch.glide?.enabled ? startGlide(ch, nowMs) : ch));
 }
 
-/** Stop every running glide and silence those channels. Others are unchanged. */
+/** Stop every running glide. Mixer fields (mute, gain, …) are unchanged. */
 export function stopAllGlides(channels: ChannelState[]): ChannelState[] {
   return channels.map((ch) => (ch.glide?.running ? stopGlide(ch) : ch));
 }

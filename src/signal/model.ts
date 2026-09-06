@@ -1,4 +1,4 @@
-import type { ChannelState } from '../audio/engine';
+import { isChannelLive, type ChannelState } from '../audio/engine';
 
 /** One sinusoidal partial used for geometry (same model as audio intent). */
 export interface SignalPartial {
@@ -16,10 +16,14 @@ export interface SignalPartial {
  * Build partials from mixer state.
  * Stereo vector scope: X ← left energy, Y ← right energy of each partial.
  */
-export function channelsToPartials(channels: ChannelState[]): SignalPartial[] {
+export function channelsToPartials(
+  channels: ChannelState[],
+  bedIds: ReadonlySet<number> = new Set(),
+): SignalPartial[] {
   const out: SignalPartial[] = [];
   for (const ch of channels) {
     if (ch.muted || ch.gain < 0.01) continue;
+    if (!isChannelLive(ch, bedIds)) continue;
     const pl = (1 - ch.pan) / 2;
     const pr = (1 + ch.pan) / 2;
     const basePhase = (ch.phaseDeg * Math.PI) / 180;
@@ -112,9 +116,12 @@ export interface SignalAnalysis {
   activeChannels: number;
 }
 
-export function analyzeSignal(channels: ChannelState[]): SignalAnalysis {
-  const active = channels.filter((c) => !c.muted && c.gain > 0.02);
-  const partials = channelsToPartials(channels);
+export function analyzeSignal(
+  channels: ChannelState[],
+  bedIds: ReadonlySet<number> = new Set(),
+): SignalAnalysis {
+  const active = channels.filter((c) => !c.muted && c.gain > 0.02 && isChannelLive(c, bedIds));
+  const partials = channelsToPartials(channels, bedIds);
 
   if (!active.length || !partials.length) {
     return {

@@ -5,16 +5,18 @@ import type { SignalAnalysis } from '../signal/model';
 
 export function GeometryCanvas({
   channels,
+  bedIds,
   playing,
   onAnalysis,
 }: {
   channels: ChannelState[];
+  bedIds: ReadonlySet<number>;
   playing: boolean;
   onAnalysis?: (a: SignalAnalysis) => void;
 }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  const stateRef = useRef({ channels, playing });
-  stateRef.current = { channels, playing };
+  const stateRef = useRef({ channels, bedIds, playing });
+  stateRef.current = { channels, bedIds, playing };
   const onAnalysisRef = useRef(onAnalysis);
   onAnalysisRef.current = onAnalysis;
 
@@ -48,6 +50,7 @@ export function GeometryCanvas({
       const s = stateRef.current;
       const analysis = drawGeometry(ctx, {
         channels: s.channels,
+        bedIds: s.bedIds,
         playing: s.playing,
         time: (now - t0) / 1000,
         width: canvas.clientWidth,

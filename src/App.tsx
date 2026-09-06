@@ -6,7 +6,6 @@ import {
   MIN_CHANNELS,
   addChannel,
   addHarmonic,
-  anyChannelAudible,
   applyBinauralPair,
   brainwaveBand,
   defaultChannels,
@@ -92,13 +91,15 @@ export default function App() {
     () => defaultChannels()[0]?.id ?? 1,
   );
   const [master, setMaster] = useState(0.5);
-  const [playing, setPlaying] = useState(false);
+  /** Play/Stop owns channels that did not have Frequency glide on when Play was pressed. */
+  const [bedPlaying, setBedPlaying] = useState(false);
+  const [bedIds, setBedIds] = useState<number[]>([]);
   const [carrier, setCarrier] = useState(200);
   const [beat, setBeat] = useState(10);
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<SignalAnalysis>(() => analyzeSignal(defaultChannels()));
   const [findings, setFindings] = useState<Finding[]>(loadFindings);
-  /** True after Unison Go all until those glides finish or Stop all. */
+  /** True after Go glides until those programs finish or Stop glides. */
   const unisonSessionRef = useRef(false);
   const [unisonActive, setUnisonActive] = useState(false);
 
@@ -118,7 +119,23 @@ export default function App() {
 
   const channelsRef = useRef(channels);
   channelsRef.current = channels;
+  const bedIdsRef = useRef(bedIds);
+  bedIdsRef.current = bedIds;
+  const bedPlayingRef = useRef(bedPlaying);
+  bedPlayingRef.current = bedPlaying;
   const seedsRef = useRef<HTMLDetailsElement>(null);
+
+  const analysisBedIds = useCallback((list: ChannelState[]) => {
+    if (!bedPlayingRef.current && !list.some((c) => c.glide?.running)) {
+      return new Set(list.map((c) => c.id));
+    }
+    return new Set(bedIdsRef.current);
+  }, []);
+
+  const emitAnalysis = useCallback(
+    (list: ChannelState[]) => analyzeSignal(list, analysisBedIds(list)),
+    [analysisBedIds],
+  );
 
   const beatHz = useMemo(() => {
     const a = channels.filter((c) => !c.muted && c.gain > 0.02);
@@ -134,23 +151,25 @@ export default function App() {
     () => channels.filter((c) => c.glide?.running).length,
     [channels],
   );
+  const bedReady = useMemo(
+    () => channels.filter((c) => !c.glide?.enabled).length,
+    [channels],
+  );
   const syncEngine = useCallback((next: ChannelState[]) => {
     if (!engine.isPlaying()) return;
-    if (anyChannelAudible(next)) {
-      engine.updateAll(next);
+    const glides = next.some((c) => c.glide?.running);
+    if (!bedPlayingRef.current && !glides) {
+      engine.stop();
       return;
     }
-    unisonSessionRef.current = false;
-    setUnisonActive(false);
-    engine.stop();
-    setPlaying(false);
+    engine.updateAll(next);
   }, []);
 
   const pushChannels = useCallback((next: ChannelState[]) => {
     setChannels(next);
-    setAnalysis(analyzeSignal(next));
+    setAnalysis(emitAnalysis(next));
     syncEngine(next);
-  }, [syncEngine]);
+  }, [syncEngine, emitAnalysis]);
 
   const updateChannel = useCallback((id: number, patch: Partial<ChannelState>) => {
     setChannels((prev) => {
@@ -172,18 +191,11 @@ export default function App() {
         }
         return { ...c, ...nextPatch };
       });
-      setAnalysis(analyzeSignal(next));
+      setAnalysis(emitAnalysis(next));
       syncEngine(next);
       return next;
     });
-  }, [syncEngine]);
-
-  const stopOutput = useCallback(() => {
-    unisonSessionRef.current = false;
-    setUnisonActive(false);
-    engine.stop();
-    setPlaying(false);
-  }, []);
+  }, [syncEngine, emitAnalysis]);
 
   // Drive optional home→destination frequency glides
   useEffect(() => {
@@ -194,10 +206,10 @@ export default function App() {
         if (!prev.some((c) => c.glide?.running)) return prev;
         const next = tickGlides(prev, now);
         if (!next) return prev;
-        setAnalysis(analyzeSignal(next));
+        setAnalysis(emitAnalysis(next));
         syncEngine(next);
         const stillRunning = next.some((c) => c.glide?.running);
-        if (!stillRunning && unisonSessionRef.current) {
+        if (!stillRunning) {
           unisonSessionRef.current = false;
           setUnisonActive(false);
         }
@@ -206,7 +218,7 @@ export default function App() {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [syncEngine]);
+  }, [syncEngine, emitAnalysis]);
 
   const onAddChannel = () => {
     if (channels.length >= MAX_CHANNELS) return;
@@ -233,29 +245,45 @@ export default function App() {
   const masterRef = useRef(master);
   masterRef.current = master;
 
-  const startAudio = useCallback(async (states: ChannelState[]) => {
+  const ensureEngine = useCallback(async (states: ChannelState[]) => {
     engine.unlock();
     setError(null);
     try {
       await engine.ensurePlaying(states, masterRef.current);
-      setPlaying(true);
+      return true;
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not start audio');
-      setPlaying(false);
+      if (!bedPlayingRef.current) engine.stop();
+      return false;
     }
   }, []);
 
+  const takeOffBed = useCallback((ids: number[]) => {
+    const drop = new Set(ids);
+    const next = bedIdsRef.current.filter((id) => !drop.has(id));
+    bedIdsRef.current = next;
+    engine.setBedIds(next);
+    setBedIds(next);
+  }, []);
+
   const onPlay = async () => {
-    await startAudio(channels);
+    const ids = channels.filter((c) => !c.glide?.enabled).map((c) => c.id);
+    setBedIds(ids);
+    engine.setBedIds(ids);
+    if (await ensureEngine(channels)) setBedPlaying(true);
+    else {
+      setBedIds([]);
+      engine.setBedIds([]);
+    }
   };
 
   const onStop = () => {
-    setChannels((prev) => {
-      const next = stopAllGlides(prev);
-      setAnalysis(analyzeSignal(next));
-      return next;
-    });
-    stopOutput();
+    setBedPlaying(false);
+    setBedIds([]);
+    engine.setBedIds([]);
+    const ch = channelsRef.current;
+    if (ch.some((c) => c.glide?.running)) engine.updateAll(ch);
+    else engine.stop();
   };
 
   const onGoAllGlides = useCallback(async () => {
@@ -264,16 +292,18 @@ export default function App() {
     unisonSessionRef.current = true;
     setUnisonActive(true);
     const next = startEnabledGlides(ch);
+    const started = next.filter((c) => c.glide.running).map((c) => c.id);
+    takeOffBed(started);
     setChannels(next);
-    setAnalysis(analyzeSignal(next));
-    await startAudio(next);
-  }, [startAudio]);
+    setAnalysis(emitAnalysis(next));
+    await ensureEngine(next);
+  }, [ensureEngine, emitAnalysis, takeOffBed]);
 
   const onStopAllGlides = () => {
     if (glideRunning === 0 && !unisonActive) return;
     const next = stopAllGlides(channelsRef.current);
     setChannels(next);
-    setAnalysis(analyzeSignal(next));
+    setAnalysis(emitAnalysis(next));
     unisonSessionRef.current = false;
     setUnisonActive(false);
     syncEngine(next);
@@ -435,9 +465,10 @@ export default function App() {
 
   const onGoChannelGlide = async (id: number) => {
     const next = channels.map((c) => (c.id === id ? startGlide(c) : c));
+    takeOffBed([id]);
     setChannels(next);
-    setAnalysis(analyzeSignal(next));
-    await startAudio(next);
+    setAnalysis(emitAnalysis(next));
+    await ensureEngine(next);
   };
 
   const markFinding = () => {
@@ -474,17 +505,28 @@ export default function App() {
           {error && <p className="error header-error">{error}</p>}
         </div>
         <div className="header-actions">
-          {!playing ? (
+          {!bedPlaying ? (
             <button
               type="button"
               className="btn primary"
+              disabled={bedReady === 0}
+              title={
+                bedReady === 0
+                  ? 'Turn Frequency glide off on at least one channel'
+                  : 'Start channels that do not have Frequency glide on'
+              }
               onPointerDown={() => engine.unlock()}
               onClick={() => void onPlay()}
             >
               Play
             </button>
           ) : (
-            <button type="button" className="btn stop" onClick={onStop}>
+            <button
+              type="button"
+              className="btn stop"
+              title="Stop channels that Play started — glides keep going"
+              onClick={onStop}
+            >
               Stop
             </button>
           )}
@@ -493,10 +535,10 @@ export default function App() {
               <button
                 type="button"
                 className="btn stop"
-                title="Stop glide channels only — other playing channels keep going"
+                title="Stop Frequency glide programs only — Play channels keep going"
                 onClick={onStopAllGlides}
               >
-                Stop all
+                Stop glides
               </button>
             ) : (
               <button
@@ -506,12 +548,12 @@ export default function App() {
                 title={
                   glideReady === 0
                     ? 'Enable Frequency glide on at least one channel'
-                    : `Start ${glideReady} enabled channel${glideReady === 1 ? '' : 's'} together`
+                    : `Start ${glideReady} Frequency glide channel${glideReady === 1 ? '' : 's'}`
                 }
                 onPointerDown={() => engine.unlock()}
                 onClick={() => void onGoAllGlides()}
               >
-                Go all
+                Go glides
               </button>
             )}
             <span className="unison-glide-count">
@@ -653,7 +695,7 @@ export default function App() {
         <button
           type="button"
           className="btn btn-small"
-          title="Lock this date/time and start the countdown to Go all"
+          title="Lock this date/time and start the countdown to Go glides"
           onClick={onSetSchedule}
         >
           Set
@@ -704,7 +746,7 @@ export default function App() {
           <button
             type="button"
             className="btn btn-small"
-            title="Cancel the scheduled Go all"
+            title="Cancel the scheduled Go glides"
             onClick={() => {
               setArmedAt(null);
               setGeoMsg(null);
@@ -742,7 +784,7 @@ export default function App() {
                     : dailyAt === 'sunrise'
                       ? 'Daily at sunrise'
                       : 'Daily at clock time'
-                  : 'Go all'
+                  : 'Go glides'
               }${
                 leadMode === 'before'
                   ? ` (${leadMin}m ${leadSec}s before)`
@@ -758,7 +800,16 @@ export default function App() {
         {/* ~70% visualizer */}
         <aside className="viz-pane">
           <section className="stage">
-            <GeometryCanvas channels={channels} playing={playing} onAnalysis={setAnalysis} />
+            <GeometryCanvas
+              channels={channels}
+              bedIds={
+                !bedPlaying && glideRunning === 0
+                  ? new Set(channels.map((c) => c.id))
+                  : new Set(bedIds)
+              }
+              playing={bedPlaying || glideRunning > 0}
+              onAnalysis={setAnalysis}
+            />
             <div className="readout">
               <div className="readout-item">
                 <span className="k">
@@ -785,8 +836,8 @@ export default function App() {
                 <span className="k">
                   Partials <Tip text={TIPS.partials} />
                 </span>
-                <span className={`v ${playing ? 'on' : ''}`}>
-                  {analysis.partialCount} · {playing ? 'live' : 'idle'}
+                <span className={`v ${bedPlaying || glideRunning > 0 ? 'on' : ''}`}>
+                  {analysis.partialCount} · {bedPlaying || glideRunning > 0 ? 'live' : 'idle'}
                 </span>
               </div>
             </div>
@@ -1587,9 +1638,9 @@ const TIPS = {
   channels:
     'Each channel is one voice: fundamental f0, optional harmonics, gain, phase, pan, wave. Together they define both the sound and the vector-scope path.',
   master: 'Overall output volume after all channels are mixed. Lower it if you add many loud channels or harmonics.',
-  mute: 'Silences this channel in audio and removes it from the geometry path until unmuted. Unmuting restores sound (including a default gain if the fader was at zero).',
+  mute: 'Silences this channel without stopping Play or Go glides. A muted glide still runs; unmute mid-way to hear it. Play / Go glides never check or uncheck Mute.',
   f0: 'Fundamental frequency of this channel (Hz). Harmonics Hn are exactly n × f0.',
-  gain: 'H1 / fundamental level (0–100%). Also scales overtones: each Hn slider is relative to this.',
+  gain: 'H1 / fundamental level (0–100%). Also scales overtones: each Hn slider is relative to this. 0 is silence — the transport stays on so you can fade in and out. Play/Stop and Go glides/Stop glides do not change this fader.',
   phase:
     'Starting phase in degrees. Alone it only shifts timing on a line; relative phase between L/R channels (e.g. ~90°) is what opens ellipses/circles.',
   pan: 'Stereo placement and scope direction: left → horizontal (X), right → vertical (Y), center → diagonal. Audio and plot share this mapping. You can move pan during a frequency glide unless “Link pan to glide” is on, which locks this slider.',
@@ -1597,7 +1648,7 @@ const TIPS = {
   harmonics:
     'Overtones at integer multiples of f0 (H2 = 2×f0, H3 = 3×f0, …). Each shows its Hz and level. They fold the path denser while staying locked to the fundamental.',
   glide:
-    'Optional: ramp f0 from Home to Destination. Off by default. Home/dest holds, Repeat (Once / Cycle / Ping-pong), and Down time are per channel. Harmonics stay n×f0. Use Go on a channel, or Go all to start every enabled channel together — a non-glide channel already playing is left alone.',
+    'Arms this channel for Go glides / Stop glides (not Play / Stop). Play only starts channels with this off. Checking it while Play is already running does not drop the tone until the next Stop or Go glides. Mute and H1 are left alone.',
   glideHome: 'Starting frequency (Hz) when you press Go. f0 jumps here, sits for Home hold, then ramps toward Destination.',
   glideDest: 'Far frequency (Hz). Once ends here after Dest hold; Cycle and Ping-pong turn around and return to Home.',
   glideHomeHold:
@@ -1608,9 +1659,9 @@ const TIPS = {
   glideTimeDown:
     'Duration of the Destination → Home leg. Used by Cycle and Ping-pong; ignored for Once.',
   glideRepeat:
-    'Once: home → dest, then this channel stops after Dest hold. Cycle: that many full round trips, then stop after the last Home hold. Ping-pong: loop until Stop all / Stop glide.',
+    'Once: home → dest, then this channel’s glide ends after Dest hold. Cycle: that many full round trips, then end after the last Home hold. Ping-pong: loop until Stop glides / Stop glide.',
   glideCycles:
-    'How many home → dest → home round trips. 1 = up, dest hold, down, home hold, then this channel stops. Other channels keep playing.',
+    'How many home → dest → home round trips. 1 = up, dest hold, down, home hold, then this channel’s glide ends (Mute and H1 unchanged). Play channels keep going.',
   glideCurve:
     'Log (pitch): equal octave steps — usually more natural. Linear (Hz): constant Hz per second. Applied on both legs.',
   glideLinkPan:
